@@ -1,0 +1,27 @@
+- id: agent-default-model
+  config:
+    provider: local-qwen
+    model: vr-agent
+- id: llm-pi-ai
+  config:
+    providers:
+      local-qwen:
+        displayName: Local Qwen
+        api: openai-completions
+        baseURL: http://127.0.0.1:8097/v1
+        apiKeyEnv: VR_AGENT_LOCAL_KEY
+        models:
+          - id: vr-agent
+            name: Qwen 27B (V100S)
+            input: [text, image]
+            contextWindow: 262144
+            maxTokens: 768
+- id: session-title-llm
+  disabled: true
+- insert:
+    - id: vrchat-pilot
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: vrchat
+        transport: streamable-http
+        url: http://127.0.0.1:29746/mcp

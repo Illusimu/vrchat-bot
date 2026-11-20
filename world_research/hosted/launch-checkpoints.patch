@@ -1,0 +1,15 @@
+--- a/src/launch-cohort.ts
++++ b/src/launch-cohort.ts
+@@ -41,6 +41,11 @@
+   const rows = await db.prepare(`SELECT world_id,milestone,launched_at,enrolled_at FROM launch_cohort
+     WHERE launched_at>=? ORDER BY launched_at,world_id LIMIT 26`).bind(now - 50 * HOUR)
+     .all<{world_id:string; milestone:Milestone; launched_at:number; enrolled_at:number}>();
+-  return rows.results.map(row => ({worldId:row.world_id,milestone:row.milestone,
++  const checkpoints = [7,14,28].flatMap(days => [now - days * DAY - 4 * HOUR, now - days * DAY]);
++  const older = await db.prepare(`SELECT world_id,milestone,launched_at,enrolled_at FROM launch_cohort
++    WHERE (launched_at BETWEEN ? AND ?) OR (launched_at BETWEEN ? AND ?) OR (launched_at BETWEEN ? AND ?)
++    ORDER BY launched_at,world_id LIMIT 8`).bind(...checkpoints)
++    .all<{world_id:string; milestone:Milestone; launched_at:number; enrolled_at:number}>();
++  return [...rows.results, ...older.results].map(row => ({worldId:row.world_id,milestone:row.milestone,
+     launchedAt:new Date(row.launched_at).toISOString(),enrolledAt:new Date(row.enrolled_at).toISOString()}));
+ }

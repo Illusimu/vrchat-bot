@@ -1,0 +1,48 @@
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,7 +1,7 @@
+ import { accountView, body, boundedText, checkCsrf, cookie, HttpError, json, now, rateLimit, session } from './core.ts';
+ import type { Account, Env } from './core.ts';
+ import { callback, interaction, startLogin, syncGuild, syncMember } from './discord.ts';
+-import { activeWorldResearchSnapshot, confirm, lookup, refreshProfiles, worldResearchPage } from './vrchat.ts';
++import { activeWorldResearchSnapshot, confirm, lookup, refreshProfiles, worldResearchDetails, worldResearchPage } from './vrchat.ts';
+ import { sendInvitations } from './registration.ts';
+ import { publishFeed } from './feed.ts';
+ import { manualLookup, requireOwner, saveManualGrant } from './manual-access.ts';
+@@ -67,6 +67,10 @@
+   if (path === '/api/world-research/page' && request.method === 'POST') {
+     checkWorldResearchToken(request, env);
+     return json(await worldResearchPage(env, url.searchParams.get('pool'), url.searchParams.get('page')));
++  }
++  if (path === '/api/world-research/details' && request.method === 'GET') {
++    checkWorldResearchToken(request, env);
++    return json(await worldResearchDetails(env, url.searchParams.get('id')));
+   }
+   if (path === '/api/world-research/sync/next' && request.method === 'GET') {
+     checkWorldResearchToken(request, env);
+--- a/src/vrchat.ts
++++ b/src/vrchat.ts
+@@ -134,6 +134,23 @@
+   }), 60_000) as Promise<ResearchPage>;
+ }
+ 
++export async function worldResearchDetails(env: Env, id: string | null) {
++  if (!id || !/^wrld_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)) throw new HttpError(400, 'Invalid world ID.');
++  const worldId = id.toLowerCase();
++  return vrchatGet(env, '/worlds/' + worldId, raw => {
++    const [world] = researchWorlds([raw], 1);
++    if (world.id !== worldId) throw new HttpError(502, 'VRChat returned a different world.');
++    const details = raw as Record<string, unknown>;
++    return { observedAt:new Date(now()).toISOString(), world:{
++      ...world,
++      description:typeof details.description === 'string' ? details.description : null,
++      authorName:typeof details.authorName === 'string' ? details.authorName : null,
++      authorId:typeof details.authorId === 'string' ? details.authorId : null,
++      version:typeof details.version === 'number' ? details.version : null,
++    }};
++  }, 60_000);
++}
++
+ export async function resolveProfiles(env: Env, input: unknown) {
+   const parsed = parseProfileInput(input);
+   const value = await vrchatGet(env, parsed.id ? `/users/${parsed.id}` : `/users?search=${encodeURIComponent(parsed.search!)}&n=10`);

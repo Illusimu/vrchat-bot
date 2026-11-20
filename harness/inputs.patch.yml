@@ -1,0 +1,9 @@
+- insert:
+    - id: vrchat-inputs
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: inputs
+        transport: stdio
+        command: python
+        args:
+          - !!js "process.env.VR_PILOT_INPUTS"

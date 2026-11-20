@@ -1,0 +1,44 @@
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -135,6 +135,27 @@
+   assetUrl.pathname = pages[normalizedPath] || path;
+   return env.ASSETS.fetch(new Request(assetUrl, request));
+ }
++async function runWorldResearchProbe(env: Env, scheduledTime: number) {
++  if (scheduledTime >= Date.parse('2026-11-17T17:00:00Z')) return false;
++  const claim = await env.DB.prepare(
++    "INSERT OR IGNORE INTO integration_state(name,value,updated_at) VALUES ('world_research_one_shot_20261117','running',?)",
++  ).bind(now()).run();
++  if (!claim.meta.changes) return false;
++  let result: unknown;
++  try {
++    result = await activeWorldResearchSnapshot(env);
++  } catch (error) {
++    if (error instanceof HttpError && error.status === 429) {
++      await env.DB.prepare("DELETE FROM integration_state WHERE name='world_research_one_shot_20261117' AND value='running'").run();
++      return false;
++    }
++    result = {error:error instanceof HttpError ? error.message : 'Unexpected probe failure.'};
++  }
++  await env.DB.prepare("UPDATE integration_state SET value=?, updated_at=? WHERE name='world_research_one_shot_20261117'")
++    .bind(JSON.stringify(result), now()).run();
++  return true;
++}
++
+ export default {
+   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+     try { return secure(await route(request, env, ctx)); }
+@@ -161,7 +182,12 @@
+         env.DB.prepare('DELETE FROM sync_runs WHERE started_at < ?').bind(time - 7 * 86400_000)
+       ]);
+       try { await syncGuild(env); } catch { console.error('Scheduled Discord role sync failed; see sync_runs'); }
+-      try { await refreshProfiles(env); } catch { console.error('Scheduled VRChat profile refresh failed'); }
++      let ranProbe = false;
++      try { ranProbe = await runWorldResearchProbe(env, _event.scheduledTime); }
++      catch { console.error('Scheduled VRChat world probe failed'); }
++      if (!ranProbe) {
++        try { await refreshProfiles(env); } catch { console.error('Scheduled VRChat profile refresh failed'); }
++      }
+       try { await sendInvitations(env); } catch { console.error('Registration invitation delivery failed'); }
+       try { await publishFeed(env); } catch { console.error('World feed publication failed'); }
+     })());

@@ -1,0 +1,182 @@
+--- a/src/vrchat.ts
++++ b/src/vrchat.ts
+@@ -88,6 +88,9 @@
+       id: value.id,
+       name: value.name,
+       releaseStatus: 'public',
++      labsPublicationDate: typeof value.labsPublicationDate === 'string' ? value.labsPublicationDate : null,
++      creatorId: typeof value.authorId === 'string' ? value.authorId : null,
++      featured: typeof value.featured === 'boolean' ? value.featured : null,
+       publicationDate: typeof value.publicationDate === 'string' ? value.publicationDate : null,
+     updatedAt: typeof value.updated_at === 'string' ? value.updated_at : null,
+     capacity: count(value.capacity),
+@@ -118,23 +121,28 @@
+ 
+ export async function worldResearchPage(env: Env, pool: string | null, page: string | null) : Promise<ResearchPage> {
+   const tags = new Map([['games', 'author_tag_game'], ['hangouts', 'author_tag_social,author_tag_hangout'], ['social', 'author_tag_social']]);
+-  if (!pool || (pool !== 'active' && pool !== 'published' && !tags.has(pool))) throw new HttpError(400, 'Unknown world pool.');
+-  if (page !== '1' && (page !== '2' || pool === 'published')) throw new HttpError(400, 'Invalid world page.');
+-  const published = pool === 'published';
+-  const limit = published ? 50 : 100;
++  if (!pool || (pool !== 'active' && pool !== 'published' && pool !== 'labs' && !tags.has(pool))) throw new HttpError(400, 'Unknown world pool.');
++  const releaseFeed = pool === 'published' || pool === 'labs';
++  if (page !== '1' && (page !== '2' || releaseFeed)) throw new HttpError(400, 'Invalid world page.');
++  const limit = releaseFeed ? 50 : 100;
+   const offset = (Number(page) - 1) * limit;
+-  const sort = published ? 'publicationDate' : 'popularity';
++  const sort = pool === 'labs' ? 'labsPublicationDate' : pool === 'published' ? 'publicationDate' : 'popularity';
+   const parameters = new URLSearchParams({releaseStatus:'public', sort, order:'descending', n:String(limit), offset:String(offset)});
+-  const tag = tags.get(pool);
++  const tag = pool === 'labs' ? 'system_labs' : tags.get(pool);
+   if (tag) parameters.set('tag', tag);
+-  const path = published ? '/worlds' : '/worlds/active';
++  const path = releaseFeed ? '/worlds' : '/worlds/active';
+   return vrchatGet(env, `${path}?${parameters}`, raw => ({
+     version:2, pool, sort, page:Number(page), limit, offset, observedAt:new Date(now()).toISOString(),
+     worlds:researchWorlds(raw, limit),
+   }), 60_000) as Promise<ResearchPage>;
+ }
+ 
+-export async function worldResearchDetails(env: Env, id: string | null) {
++export type WorldDetailSnapshot = {
++  observedAt:string; world:ReturnType<typeof researchWorlds>[number] & {
++    description:string|null; authorName:string|null; authorId:string|null; version:number|null;
++  };
++};
++export async function worldResearchDetails(env: Env, id: string | null): Promise<WorldDetailSnapshot> {
+   if (!id || !/^wrld_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)) throw new HttpError(400, 'Invalid world ID.');
+   const worldId = id.toLowerCase();
+   return vrchatGet(env, '/worlds/' + worldId, raw => {
+@@ -148,7 +156,7 @@
+       authorId:typeof details.authorId === 'string' ? details.authorId : null,
+       version:typeof details.version === 'number' ? details.version : null,
+     }};
+-  }, 60_000);
++  }, 60_000) as Promise<WorldDetailSnapshot>;
+ }
+ 
+ export async function resolveProfiles(env: Env, input: unknown) {
+--- a/src/world-sweep.ts
++++ b/src/world-sweep.ts
+@@ -3,10 +3,11 @@
+ import { HttpError } from './core.ts';
+ import type { Env } from './core.ts';
+ import type { SweepParameters } from './world-history.ts';
+-import { worldResearchPage } from './vrchat.ts';
+-import type { ResearchPage } from './vrchat.ts';
++import { worldResearchDetails, worldResearchPage } from './vrchat.ts';
++import type { ResearchPage, WorldDetailSnapshot } from './vrchat.ts';
++import { trackLaunches } from './launch-cohort.ts';
+ 
+-const POOLS = ['active', 'games', 'social', 'published'];
++const POOLS = ['active', 'games', 'social', 'published', 'labs'];
+ type PageResult = { status: 'ok'; data: ResearchPage }
+   | { status: 'failed' | 'skipped'; pool: string; page: number; reason: string; code?: number };
+ 
+@@ -28,7 +29,7 @@
+     let attempted = false;
+     for (const pool of POOLS) {
+       let first: ResearchPage | undefined;
+-      for (const page of pool === 'published' ? [1] : [1, 2]) {
++      for (const page of pool === 'published' || pool === 'labs' ? [1] : [1, 2]) {
+         if (halted || (page === 2 && first && !shouldFetchSecond(first, audit))) {
+           results.push({status:'skipped', pool, page, reason:halted ? 'Previous request failed' : 'First page met the stopping rule'});
+           continue;
+@@ -53,16 +54,46 @@
+       }
+     }
+     const batchId = event.instanceId;
++    const pages = results.flatMap(result => result.status === 'ok' ? [result.data] : []);
++    const enrollment = await step.do('select launches for follow-up', async () => trackLaunches(this.env, pages, slot, batchId));
++    const observed = new Set(pages.flatMap(p => p.worlds.filter(world => world.occupants !== null).map(world => world.id)));
++    const followUps: ({worldId:string; status:'ok'; observedAt:string; world:ResearchPage['worlds'][number]}
++      | {worldId:string; status:'failed'|'skipped'; reason:string; code?:number})[] = [];
++    for (const worldId of new Set(enrollment.map(item => item.worldId))) {
++      if (observed.has(worldId)) continue;
++      if (halted) {
++        followUps.push({worldId, status:'skipped', reason:'Previous upstream request failed'});
++        continue;
++      }
++      let result;
++      for (let attempt = 1; ; attempt++) {
++        await step.sleep('space launch ' + worldId + ' attempt ' + attempt, 65_000);
++        result = await step.do('sample launch ' + worldId + ' attempt ' + attempt,
++          {retries:{limit:0, delay:'1 second'}}, async () => {
++          try {
++            const snapshot: WorldDetailSnapshot = await worldResearchDetails(this.env, worldId);
++            const {description, authorName, authorId, version, ...world} = snapshot.world;
++            return {worldId, status:'ok' as const, observedAt:snapshot.observedAt, world};
++          } catch (error) {
++            return {worldId, status:'failed' as const, code:error instanceof HttpError ? error.status : 500,
++              reason:error instanceof HttpError ? error.message : 'Launch lookup failed'};
++          }
++        });
++        if (result.status === 'ok' || result.code !== 429 || attempt === 3) break;
++      }
++      followUps.push(result);
++      if (result.status==='failed' && (result.code===429 || result.code===503)) halted = true;
++    }
+     const finishedAt = await step.do('record sweep finish', async () => new Date().toISOString());
+     await step.do('publish completed sweep', async () => {
+       const db = this.env.WORLD_RESEARCH_BUFFER;
+       if (!db) throw new Error('World history buffer binding is missing');
+-      const payload = JSON.stringify({version:1, batchId, slot, startedAt, finishedAt, results});
++      const payload = JSON.stringify({version:1, batchId, slot, startedAt, finishedAt, results, launchStudy:{enrollment,followUps}});
+       await db.batch([
+         db.prepare('INSERT OR IGNORE INTO world_batches(batch_id,payload) VALUES (?,?)').bind(batchId, payload),
+         db.prepare('DELETE FROM world_batches WHERE acknowledged_at <= ?').bind(Date.now() - 7 * 86400000),
+       ]);
+     });
+-    return {batchId, pages:results.filter(result => result.status === 'ok').length, halted};
++    return {batchId, pages:results.filter(result => result.status === 'ok').length, halted, launchEnrollments:enrollment.length, launchLookups:followUps.length};
+   }
+ }
+--- /dev/null
++++ b/src/launch-cohort.ts
+@@ -0,0 +1,46 @@
++import type { Env } from './core.ts';
++import type { ResearchPage } from './vrchat.ts';
++
++const HOUR = 3600000;
++const DAY = 24 * HOUR;
++type Milestone = 'labs' | 'public';
++export type Enrollment = {worldId:string; milestone:Milestone; launchedAt:string; enrolledAt:string};
++
++export function recentLaunches(pages: ResearchPage[], now: number, slot: number) {
++  const preference = (Math.floor(slot / DAY) + Math.floor(slot % DAY / (2 * HOUR))) % 2 ? 'labs' : 'public';
++  const candidates: {worldId:string; milestone:Milestone; launched:number}[] = [];
++  for (const page of pages) {
++    const milestone = page.pool === 'labs' ? 'labs' : page.pool === 'published' ? 'public' : null;
++    if (!milestone) continue;
++    for (const world of page.worlds) {
++      const launched = Date.parse((milestone === 'labs' ? world.labsPublicationDate : world.publicationDate) ?? '');
++      if (Number.isFinite(launched) && (now - launched) >= 0 && (now - launched) <= 4 * HOUR) {
++        candidates.push({worldId:world.id, milestone, launched});
++      }
++    }
++  }
++  return candidates.sort((a,b) => Number(b.milestone === preference) - Number(a.milestone === preference)
++                        || b.launched - a.launched || a.worldId.localeCompare(b.worldId));
++}
++
++export async function trackLaunches(env: Env, pages: ResearchPage[], slot: number, sweepId: string): Promise<Enrollment[]> {
++  const db = env.WORLD_RESEARCH_BUFFER;
++  if (!db) throw new Error('World history buffer binding is missing');
++  const now = Date.now();
++  const candidates = recentLaunches(pages, now, slot);
++  // Keep one admission per sweep, including Workflow retries. Limit lookup work if manual sweeps overlap.
++  const available = await db.prepare('SELECT world_id,milestone,launched_at FROM launch_cohort WHERE launched_at>=?')
++    .bind(now - 50 * HOUR).all<{world_id:string; milestone:Milestone; launched_at:number}>();
++  const existing = new Set(available.results.map(row => `${row.world_id}:${row.milestone}:${row.launched_at}`));
++  const next = candidates.find(candidate => !existing.has(`${candidate.worldId}:${candidate.milestone}:${candidate.launched}`));
++  if (next) {
++    await db.prepare(`INSERT OR IGNORE INTO launch_cohort(world_id,milestone,launched_at,enrolled_at,sweep_id)
++      SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM launch_cohort WHERE launched_at>=?)<26`)
++      .bind(next.worldId,next.milestone,next.launched,now,sweepId,now-50*HOUR).run();
++  }
++  const rows = await db.prepare(`SELECT world_id,milestone,launched_at,enrolled_at FROM launch_cohort
++    WHERE launched_at>=? ORDER BY launched_at,world_id LIMIT 26`).bind(now - 50 * HOUR)
++    .all<{world_id:string; milestone:Milestone; launched_at:number; enrolled_at:number}>();
++  return rows.results.map(row => ({worldId:row.world_id,milestone:row.milestone,
++    launchedAt:new Date(row.launched_at).toISOString(),enrolledAt:new Date(row.enrolled_at).toISOString()}));
++}

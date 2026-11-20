@@ -1,0 +1,111 @@
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -23,6 +23,16 @@
+   headers.set('Strict-Transport-Security', 'max-age=31536000');
+   return new Response(response.body, {status:response.status, headers});
+ }
++function checkWorldResearchToken(request: Request, env: Env) {
++  const expected = env.WORLD_RESEARCH_TOKEN;
++  if (!expected || !/^[a-f0-9]{64}$/.test(expected)) throw new HttpError(503, 'World research is unavailable.');
++  const match = request.headers.get('Authorization')?.match(/^Bearer ([a-f0-9]{64})$/);
++  if (!match) throw new HttpError(401, 'Invalid world research token.');
++  let difference = 0;
++  for (let i = 0; i < expected.length; i++) difference |= expected.charCodeAt(i) ^ match[1].charCodeAt(i);
++  if (difference !== 0) throw new HttpError(401, 'Invalid world research token.');
++}
++
+ export async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+   const url = new URL(request.url);
+   if (url.origin !== env.APP_ORIGIN && (request.method === 'GET' || request.method === 'HEAD') &&
+@@ -49,6 +59,10 @@
+   if (path === '/auth/discord' && request.method === 'GET') return startLogin(request, env);
+   if (path === '/auth/discord/callback' && request.method === 'GET') return callback(request, env);
+   if (path === '/discord/interactions' && request.method === 'POST') return interaction(request, env, ctx, await boundedText(request, 65536));
++  if (path === '/api/world-research/active' && request.method === 'POST') {
++    checkWorldResearchToken(request, env);
++    return json(await activeWorldResearchSnapshot(env));
++  }
+   if (path.startsWith('/api/')) {
+     const current = await session(request, env);
+     if (path.startsWith('/api/admin/')) {
+@@ -135,27 +149,6 @@
+   assetUrl.pathname = pages[normalizedPath] || path;
+   return env.ASSETS.fetch(new Request(assetUrl, request));
+ }
+-async function runWorldResearchProbe(env: Env, scheduledTime: number) {
+-  if (scheduledTime >= Date.parse('2026-11-17T17:00:00Z')) return false;
+-  const claim = await env.DB.prepare(
+-    "INSERT OR IGNORE INTO integration_state(name,value,updated_at) VALUES ('world_research_one_shot_20261117','running',?)",
+-  ).bind(now()).run();
+-  if (!claim.meta.changes) return false;
+-  let result: unknown;
+-  try {
+-    result = await activeWorldResearchSnapshot(env);
+-  } catch (error) {
+-    if (error instanceof HttpError && error.status === 429) {
+-      await env.DB.prepare("DELETE FROM integration_state WHERE name='world_research_one_shot_20261117' AND value='running'").run();
+-      return false;
+-    }
+-    result = {error:error instanceof HttpError ? error.message : 'Unexpected probe failure.'};
+-  }
+-  await env.DB.prepare("UPDATE integration_state SET value=?, updated_at=? WHERE name='world_research_one_shot_20261117'")
+-    .bind(JSON.stringify(result), now()).run();
+-  return true;
+-}
+-
+ export default {
+   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+     try { return secure(await route(request, env, ctx)); }
+@@ -182,12 +175,7 @@
+         env.DB.prepare('DELETE FROM sync_runs WHERE started_at < ?').bind(time - 7 * 86400_000)
+       ]);
+       try { await syncGuild(env); } catch { console.error('Scheduled Discord role sync failed; see sync_runs'); }
+-      let ranProbe = false;
+-      try { ranProbe = await runWorldResearchProbe(env, _event.scheduledTime); }
+-      catch { console.error('Scheduled VRChat world probe failed'); }
+-      if (!ranProbe) {
+-        try { await refreshProfiles(env); } catch { console.error('Scheduled VRChat profile refresh failed'); }
+-      }
++      try { await refreshProfiles(env); } catch { console.error('Scheduled VRChat profile refresh failed'); }
+       try { await sendInvitations(env); } catch { console.error('Registration invitation delivery failed'); }
+       try { await publishFeed(env); } catch { console.error('World feed publication failed'); }
+     })());
+--- a/src/core.ts
++++ b/src/core.ts
+@@ -16,6 +16,7 @@
+   GITHUB_FEED_TOKEN?: string;
+   GITHUB_FEED_REPO?: string;
+   VRCHAT_USER_AGENT: string;
++  WORLD_RESEARCH_TOKEN?: string;
+ }
+ export interface Account {
+   discord_id: string;
+--- a/src/vrchat.ts
++++ b/src/vrchat.ts
+@@ -38,7 +38,7 @@
+ function profiles(raw: unknown) {
+   return Array.isArray(raw) ? raw.map(profile) : profile(raw);
+ }
+-async function vrchatGet(env: Env, path: string, shape: (raw: unknown) => unknown = profiles) {
++async function vrchatGet(env: Env, path: string, shape: (raw: unknown) => unknown = profiles, cacheMs = 300_000) {
+   if (!env.VRCHAT_AUTH_COOKIE) throw new HttpError(503, 'VRChat lookup is not connected yet. Your Discord registration is saved; you can link VRChat once lookup is enabled.');
+   const cached = await env.DB.prepare('SELECT payload FROM vrchat_cache WHERE cache_key = ? AND expires_at > ?').bind(path, now()).first<{payload:string}>();
+   if (cached) return JSON.parse(cached.payload);
+@@ -71,7 +71,7 @@
+       .bind(JSON.stringify({seed:auth.seed,iv:[...iv],data:[...new Uint8Array(ciphertext)]}),now()).run();
+   }
+   await env.DB.batch([
+-    env.DB.prepare('INSERT INTO vrchat_cache(cache_key,payload,expires_at) VALUES (?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload, expires_at=excluded.expires_at').bind(path,JSON.stringify(value),now()+300_000),
++    env.DB.prepare('INSERT INTO vrchat_cache(cache_key,payload,expires_at) VALUES (?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload, expires_at=excluded.expires_at').bind(path,JSON.stringify(value),now()+cacheMs),
+     env.DB.prepare("INSERT INTO integration_state(name,value,updated_at) VALUES ('vrchat_health','ok',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").bind(now())
+   ]);
+   return value;
+@@ -97,7 +97,7 @@
+       };
+     });
+     return {version:1, source:'active', observedAt:new Date(now()).toISOString(), worlds};
+-  });
++  }, 60_000);
+ }
+ export async function resolveProfiles(env: Env, input: unknown) {
+   const parsed = parseProfileInput(input);

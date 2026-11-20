@@ -1,0 +1,10 @@
+/build/
+__pycache__/
+/world-research.sqlite3*
+/.world-research-token
+/world-pilot-*.ndjson
+/world-history-sync.log*
+/.venv/
+/.env
+/.env.*
+/.dev.vars

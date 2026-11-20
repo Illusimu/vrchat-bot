@@ -1,0 +1,236 @@
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -6,6 +6,7 @@
+ import { publishFeed } from './feed.ts';
+ import { manualLookup, requireOwner, saveManualGrant } from './manual-access.ts';
+ import type { ManualGrant } from './manual-access.ts';
++import { acknowledgeWorldBatch, nextWorldBatch, queueWorldSweep } from './world-history.ts';
+ 
+ async function accountResponse(env:Env, account:Account) {
+   const grant=account.vrchat_id?await env.DB.prepare('SELECT show_in_credits,expires_at FROM manual_grants WHERE vrchat_id=? AND enabled=1 AND (expires_at IS NULL OR expires_at>?)').bind(account.vrchat_id,now()).first<{show_in_credits:number;expires_at:number|null}>():null;
+@@ -66,6 +67,14 @@
+   if (path === '/api/world-research/page' && request.method === 'POST') {
+     checkWorldResearchToken(request, env);
+     return json(await worldResearchPage(env, url.searchParams.get('pool'), url.searchParams.get('page')));
++  }
++  if (path === '/api/world-research/sync/next' && request.method === 'GET') {
++    checkWorldResearchToken(request, env);
++    return nextWorldBatch(env, url.searchParams.get('after'));
++  }
++  if (path === '/api/world-research/sync/ack' && request.method === 'POST') {
++    checkWorldResearchToken(request, env);
++    return acknowledgeWorldBatch(env, url.searchParams.get('sequence'), url.searchParams.get('id'));
+   }
+   if (path.startsWith('/api/')) {
+     const current = await session(request, env);
+@@ -167,6 +176,8 @@
+   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+     ctx.waitUntil((async () => {
+       const time = now();
++      try { await queueWorldSweep(env, _event.scheduledTime); }
++      catch { console.error('Scheduled VRChat sweep could not be queued'); }
+       await env.DB.batch([
+         env.DB.prepare('DELETE FROM sessions WHERE expires_at <= ?').bind(time),
+         env.DB.prepare('DELETE FROM oauth_states WHERE expires_at <= ?').bind(time),
+--- a/src/core.ts
++++ b/src/core.ts
+@@ -17,6 +17,9 @@
+   GITHUB_FEED_REPO?: string;
+   VRCHAT_USER_AGENT: string;
+   WORLD_RESEARCH_TOKEN?: string;
++  WORLD_RESEARCH_BUFFER?: D1Database;
++  WORLD_RESEARCH_SWEEPS?: Workflow<import('./world-history.ts').SweepParameters>;
++  WORLD_RESEARCH_SCHEDULE?: string;
+ }
+ export interface Account {
+   discord_id: string;
+--- a/src/vrchat.ts
++++ b/src/vrchat.ts
+@@ -89,6 +89,14 @@
+       name: value.name,
+       releaseStatus: 'public',
+       publicationDate: typeof value.publicationDate === 'string' ? value.publicationDate : null,
++    updatedAt: typeof value.updated_at === 'string' ? value.updated_at : null,
++    capacity: count(value.capacity),
++    platforms: Array.isArray(value.supportedPlatforms)
++      ? value.supportedPlatforms.filter((item: unknown) => typeof item === 'string')
++      : Array.isArray(value.unityPackages)
++        ? [...new Set<string>(value.unityPackages.flatMap((item: {platform?: unknown}) =>
++            typeof item?.platform === 'string' ? [item.platform] : []))]
++        : null,
+       tags: Array.isArray(value.tags) ? value.tags.filter((tag: unknown) => typeof tag === 'string') : null,
+       occupants: count(value.occupants),
+       visits: count(value.visits),
+@@ -103,7 +111,12 @@
+   }), 60_000);
+ }
+ 
+-export async function worldResearchPage(env: Env, pool: string | null, page: string | null) {
++export type ResearchPage = {
++  version: number; pool: string; sort: string; page: number; limit: number; offset: number;
++  observedAt: string; worlds: ReturnType<typeof researchWorlds>;
++};
++
++export async function worldResearchPage(env: Env, pool: string | null, page: string | null) : Promise<ResearchPage> {
+   const tags = new Map([['games', 'author_tag_game'], ['hangouts', 'author_tag_social,author_tag_hangout'], ['social', 'author_tag_social']]);
+   if (!pool || (pool !== 'active' && pool !== 'published' && !tags.has(pool))) throw new HttpError(400, 'Unknown world pool.');
+   if (page !== '1' && (page !== '2' || pool === 'published')) throw new HttpError(400, 'Invalid world page.');
+@@ -118,7 +131,7 @@
+   return vrchatGet(env, `${path}?${parameters}`, raw => ({
+     version:2, pool, sort, page:Number(page), limit, offset, observedAt:new Date(now()).toISOString(),
+     worlds:researchWorlds(raw, limit),
+-  }), 60_000);
++  }), 60_000) as Promise<ResearchPage>;
+ }
+ 
+ export async function resolveProfiles(env: Env, input: unknown) {
+--- a/wrangler.jsonc
++++ b/wrangler.jsonc
+@@ -2,7 +2,7 @@
+   "$schema": "node_modules/wrangler/config-schema.json",
+   "name": "escapethroughreality",
+   "account_id": "75d72ca116ad3d82062099ef29fc06ff",
+-  "main": "src/index.ts",
++  "main": "src/worker.ts",
+   "compatibility_date": "2026-09-01",
+   "workers_dev": true,
+   "preview_urls": false,
+@@ -16,9 +16,19 @@
+     "database_name": "escapethroughreality-db",
+     "database_id": "8e301681-773a-4322-82f9-d1a05866c56a",
+     "migrations_dir": "migrations"
++  }, {
++    "binding": "WORLD_RESEARCH_BUFFER",
++    "database_name": "escapethroughreality-world-history-buffer",
++    "database_id": "4d408729-8f97-4ece-8af1-5bbcf719ec4f"
++  }],
++  "workflows": [{
++    "name": "escapethroughreality-world-sweep",
++    "binding": "WORLD_RESEARCH_SWEEPS",
++    "class_name": "WorldResearchSweep"
+   }],
+   "triggers": { "crons": ["*/15 * * * *"] },
+   "vars": {
++    "WORLD_RESEARCH_SCHEDULE": "disabled",
+     "APP_ORIGIN": "https://escapethroughreality.com",
+     "DEV_DISCORD_USER_ID": "1142286879316783125",
+     "REDIRECT_HOSTS": "escapethroughreality.illusimvrc.workers.dev,www.escapethroughreality.com",
+--- /dev/null
++++ b/src/worker.ts
+@@ -0,0 +1,2 @@
++export { default } from './index.ts';
++export { WorldResearchSweep } from './world-sweep.ts';
+--- /dev/null
++++ b/src/world-history.ts
+@@ -0,0 +1,40 @@
++import { HttpError, json, now } from './core.ts';
++import type { Env } from './core.ts';
++
++export type SweepParameters = { slot: number; delaySeconds: number; audit: boolean };
++
++export async function queueWorldSweep(env: Env, scheduledTime: number) {
++  const interval = 2 * 60 * 60 * 1000;
++  if (env.WORLD_RESEARCH_SCHEDULE !== 'enabled' || !env.WORLD_RESEARCH_SWEEPS || scheduledTime % interval !== 0) return;
++  const id = `sweep-${scheduledTime}`;
++  const params = { slot: scheduledTime, delaySeconds: 30 + Math.floor(Math.random() * 510), audit: scheduledTime % 86400000 === 0 };
++  // A unique ID per slot makes redelivered cron events harmless.
++  try { await env.WORLD_RESEARCH_SWEEPS.create({ id, params }); }
++  catch (error) {
++    if (!(error instanceof Error && /already exists|duplicate/i.test(error.message))) throw error;
++  }
++}
++
++export async function nextWorldBatch(env: Env, after: string | null) {
++  const db = env.WORLD_RESEARCH_BUFFER;
++  if (!db) throw new HttpError(503, 'World history buffer is unavailable.');
++  if (after !== null && (!/^\d{1,15}$/.test(after) || !Number.isSafeInteger(Number(after)))) throw new HttpError(400, 'Invalid batch cursor.');
++  const row = after === null
++    ? await db.prepare('SELECT sequence, payload FROM world_batches WHERE acknowledged_at IS NULL ORDER BY sequence LIMIT 1').first<{sequence:number; payload:string}>()
++    : await db.prepare('SELECT sequence, payload FROM world_batches WHERE sequence > ? ORDER BY sequence LIMIT 1').bind(Number(after)).first<{sequence:number; payload:string}>();
++  if (!row) return new Response(null, {status:204});
++  return new Response(row.payload, {headers:{'Content-Type':'application/json; charset=utf-8', 'X-World-Batch-Sequence':String(row.sequence)}});
++}
++
++export async function acknowledgeWorldBatch(env: Env, sequence: string | null, batchId: string | null) {
++  const db = env.WORLD_RESEARCH_BUFFER;
++  if (!db) throw new HttpError(503, 'World history buffer is unavailable.');
++  if (!sequence || !/^[1-9]\d{0,14}$/.test(sequence) || !batchId || !/^[A-Za-z0-9_-]{1,100}$/.test(batchId)) {
++    throw new HttpError(400, 'Invalid world batch identity.');
++  }
++  // Preserve the original acknowledgement time on retries.
++  const row = await db.prepare('UPDATE world_batches SET acknowledged_at = coalesce(acknowledged_at, ?) WHERE sequence = ? AND batch_id = ? RETURNING sequence')
++    .bind(now(), Number(sequence), batchId).first<{sequence:number}>();
++  if (!row) throw new HttpError(404, 'World batch was not found.');
++  return json({acknowledged:true});
++}
+--- /dev/null
++++ b/src/world-sweep.ts
+@@ -0,0 +1,68 @@
++import { WorkflowEntrypoint } from 'cloudflare:workers';
++import type { WorkflowEvent, WorkflowStep } from 'cloudflare:workers';
++import { HttpError } from './core.ts';
++import type { Env } from './core.ts';
++import type { SweepParameters } from './world-history.ts';
++import { worldResearchPage } from './vrchat.ts';
++import type { ResearchPage } from './vrchat.ts';
++
++const POOLS = ['active', 'games', 'social', 'published'];
++type PageResult = { status: 'ok'; data: ResearchPage }
++  | { status: 'failed' | 'skipped'; pool: string; page: number; reason: string; code?: number };
++
++export function shouldFetchSecond(first: ResearchPage, audit: boolean) {
++  if (audit) return true;
++  if (first.worlds.length < first.limit) return false;
++  const tail = first.worlds.slice(-20).map(world => world.occupants);
++  return tail.some(count => count === null) || tail.filter(count => count !== null && count >= 20).length >= 10;
++}
++
++export class WorldResearchSweep extends WorkflowEntrypoint<Env, SweepParameters> {
++  async run(event: WorkflowEvent<SweepParameters>, step: WorkflowStep) {
++    const { slot, delaySeconds, audit } = event.payload;
++    if (!Number.isFinite(slot) || !Number.isFinite(delaySeconds) || delaySeconds < 0 || delaySeconds > 540) throw new Error('Invalid sweep parameters.');
++    if (delaySeconds) await step.sleep('offset sweep start', delaySeconds * 1000);
++    const startedAt = await step.do('record sweep start', async () => new Date().toISOString());
++    const results: PageResult[] = [];
++    let halted = false;
++    let attempted = false;
++    for (const pool of POOLS) {
++      let first: ResearchPage | undefined;
++      for (const page of pool === 'published' ? [1] : [1, 2]) {
++        if (halted || (page === 2 && first && !shouldFetchSecond(first, audit))) {
++          results.push({status:'skipped', pool, page, reason:halted ? 'Previous request failed' : 'First page met the stopping rule'});
++          continue;
++        }
++        let result: PageResult;
++        for (let attempt = 1; ; attempt++) {
++          if (attempted) await step.sleep(`space ${pool} page ${page} attempt ${attempt}`, 65_000);
++          attempted = true;
++          result = await step.do(`fetch ${pool} page ${page} attempt ${attempt}`, {retries:{limit:0, delay:'1 second'}}, async (): Promise<PageResult> => {
++            try { return {status:'ok', data:await worldResearchPage(this.env, pool, String(page))}; }
++            catch (error) {
++              return {status:'failed', pool, page, code:error instanceof HttpError ? error.status : 500,
++                      reason:error instanceof HttpError ? error.message : 'World request failed'};
++            }
++          });
++          // The shared limiter can be busy when the site just refreshed a profile.
++          if (result.status === 'ok' || result.code !== 429 || attempt === 3) break;
++        }
++        results.push(result);
++        if (result.status === 'ok') first = result.data;
++        else halted = true;
++      }
++    }
++    const batchId = event.instanceId;
++    const finishedAt = await step.do('record sweep finish', async () => new Date().toISOString());
++    await step.do('publish completed sweep', async () => {
++      const db = this.env.WORLD_RESEARCH_BUFFER;
++      if (!db) throw new Error('World history buffer binding is missing');
++      const payload = JSON.stringify({version:1, batchId, slot, startedAt, finishedAt, results});
++      await db.batch([
++        db.prepare('INSERT OR IGNORE INTO world_batches(batch_id,payload) VALUES (?,?)').bind(batchId, payload),
++        db.prepare('DELETE FROM world_batches WHERE acknowledged_at <= ?').bind(Date.now() - 7 * 86400000),
++      ]);
++    });
++    return {batchId, pages:results.filter(result => result.status === 'ok').length, halted};
++  }
++}

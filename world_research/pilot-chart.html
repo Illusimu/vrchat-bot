@@ -1,0 +1,49 @@
+<section id="vrchat-world-activity" data-viz-composition>
+  <style>
+    #vrchat-world-activity { display: grid; gap: calc(var(--font-size-base) * .75); }
+    #vrchat-world-activity .pilot-summary { display: grid; gap: calc(var(--font-size-base) * .25); }
+  </style>
+  <h2>VRChat world activity</h2>
+  <p class="text-muted text-small" id="vrchat-pilot-coverage"></p>
+  <div class="viz-controls">
+    <label class="form-label">Discovery pool
+      <select class="form-select" id="vrchat-pilot-pool" disabled></select>
+    </label>
+  </div>
+  <div class="pilot-summary" aria-live="polite">
+    <p id="vrchat-pilot-stats" class="tabular-nums"></p>
+    <p id="vrchat-pilot-peak" class="text-muted text-small"></p>
+  </div>
+  <div data-viz-container></div>
+  <!-- CHART_DATA -->
+  <script type="application/json" id="vrchat-pilot-summary">SUMMARY_DATA</script>
+</section>
+<script type="module">
+  import { mountChart } from "https://persistent.oaistatic.com/plugins/visualize/charts/1.6.5/element.js";
+  const root = document.getElementById("vrchat-world-activity");
+  const select = root.querySelector("select");
+  const info = JSON.parse(root.querySelector("#vrchat-pilot-summary").textContent);
+  const configs = new Map(Array.from(root.querySelectorAll("[data-viz-chart]"),
+    element => [element.dataset.pool, JSON.parse(element.textContent)]));
+  const chart = mountChart(root.querySelector("[data-viz-container]"), configs.get("all"));
+  const count = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+  const percent = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 });
+  for (const [pool, stats] of Object.entries(info.pools)) select.add(new Option(stats.label, pool));
+  root.querySelector("#vrchat-pilot-coverage").textContent =
+    `${count.format(info.unique)} distinct worlds · ${count.format(info.multiplePools)} appeared in multiple discovery pools`;
+  function update() {
+    const stats = info.pools[select.value];
+    const format = value => value === null ? "Unavailable" : count.format(value);
+    const share = stats.top10 === null ? "unavailable" : percent.format(stats.top10);
+    root.querySelector("#vrchat-pilot-stats").textContent =
+      `${count.format(stats.measured)} measured · Mean ${format(stats.mean)} · Median ${format(stats.median)} · Top 10 share ${share}`;
+    root.querySelector("#vrchat-pilot-peak").textContent = stats.peak
+      ? `Highest count · ${stats.peak[0]} · ${count.format(stats.peak[1])} players` : "Player counts unavailable";
+  }
+  select.addEventListener("change", () => {
+    chart.config = configs.get(select.value);
+    update();
+  });
+  select.disabled = false;
+  update();
+</script>

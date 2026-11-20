@@ -1,0 +1,17 @@
+diff --git a/src/world-history.ts b/src/world-history.ts
+--- a/src/world-history.ts
++++ b/src/world-history.ts
+@@ -7,7 +7,8 @@
+   const interval = 2 * 60 * 60 * 1000;
+-  if (env.WORLD_RESEARCH_SCHEDULE !== 'enabled' || !env.WORLD_RESEARCH_SWEEPS || scheduledTime % interval !== 0) return;
+-  const id = `sweep-${scheduledTime}`;
+-  const params = { slot: scheduledTime, delaySeconds: 30 + Math.floor(Math.random() * 510), audit: scheduledTime % 86400000 === 0 };
+-  // A unique ID per slot makes redelivered cron events harmless.
++  if (env.WORLD_RESEARCH_SCHEDULE !== 'enabled' || !env.WORLD_RESEARCH_SWEEPS) return;
++  const slot = Math.floor(scheduledTime / interval) * interval;
++  const id = `sweep-${slot}`;
++  const params = { slot, delaySeconds: 30 + Math.floor(Math.random() * 510), audit: slot % 86400000 === 0 };
++  // Every quarter-hour tick can queue its two-hour window. Workflow IDs deduplicate retries.
+   try { await env.WORLD_RESEARCH_SWEEPS.create({ id, params }); }
+   catch (error) {
+

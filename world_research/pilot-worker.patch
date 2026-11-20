@@ -1,0 +1,97 @@
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,7 +1,7 @@
+ import { accountView, body, boundedText, checkCsrf, cookie, HttpError, json, now, rateLimit, session } from './core.ts';
+ import type { Account, Env } from './core.ts';
+ import { callback, interaction, startLogin, syncGuild, syncMember } from './discord.ts';
+-import { activeWorldResearchSnapshot, confirm, lookup, refreshProfiles } from './vrchat.ts';
++import { activeWorldResearchSnapshot, confirm, lookup, refreshProfiles, worldResearchPage } from './vrchat.ts';
+ import { sendInvitations } from './registration.ts';
+ import { publishFeed } from './feed.ts';
+ import { manualLookup, requireOwner, saveManualGrant } from './manual-access.ts';
+@@ -62,6 +62,10 @@
+   if (path === '/api/world-research/active' && request.method === 'POST') {
+     checkWorldResearchToken(request, env);
+     return json(await activeWorldResearchSnapshot(env));
++  }
++  if (path === '/api/world-research/page' && request.method === 'POST') {
++    checkWorldResearchToken(request, env);
++    return json(await worldResearchPage(env, url.searchParams.get('pool'), url.searchParams.get('page')));
+   }
+   if (path.startsWith('/api/')) {
+     const current = await session(request, env);
+--- a/src/vrchat.ts
++++ b/src/vrchat.ts
+@@ -76,29 +76,51 @@
+   ]);
+   return value;
+ }
++function researchWorlds(raw: unknown, limit: number) {
++  if (!Array.isArray(raw) || raw.length > limit) throw new HttpError(502, 'VRChat returned an invalid world list.');
++  return raw.map(value => {
++    if (!value || typeof value.id !== 'string' || !/^wrld_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value.id)
++        || typeof value.name !== 'string' || value.releaseStatus !== 'public') {
++      throw new HttpError(502, 'VRChat returned an invalid public world.');
++    }
++    const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
++    return {
++      id: value.id,
++      name: value.name,
++      releaseStatus: 'public',
++      publicationDate: typeof value.publicationDate === 'string' ? value.publicationDate : null,
++      tags: Array.isArray(value.tags) ? value.tags.filter((tag: unknown) => typeof tag === 'string') : null,
++      occupants: count(value.occupants),
++      visits: count(value.visits),
++      favorites: count(value.favorites),
++    };
++  });
++}
++
+ export async function activeWorldResearchSnapshot(env: Env) {
+-  return vrchatGet(env, '/worlds/active?releaseStatus=public&sort=popularity&n=10', raw => {
+-    if (!Array.isArray(raw) || raw.length > 10) throw new HttpError(502, 'VRChat returned an invalid world list.');
+-    const worlds = raw.map(value => {
+-      if (!value || typeof value.id !== 'string' || !/^wrld_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value.id)
+-          || typeof value.name !== 'string' || value.releaseStatus !== 'public') {
+-        throw new HttpError(502, 'VRChat returned an invalid public world.');
+-      }
+-      const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+-      return {
+-        id: value.id,
+-        name: value.name,
+-        releaseStatus: 'public',
+-        publicationDate: typeof value.publicationDate === 'string' ? value.publicationDate : null,
+-        tags: Array.isArray(value.tags) ? value.tags.filter((tag: unknown) => typeof tag === 'string') : null,
+-        occupants: count(value.occupants),
+-        visits: count(value.visits),
+-        favorites: count(value.favorites),
+-      };
+-    });
+-    return {version:1, source:'active', observedAt:new Date(now()).toISOString(), worlds};
+-  }, 60_000);
++  return vrchatGet(env, '/worlds/active?releaseStatus=public&sort=popularity&n=10', raw => ({
++    version:1, source:'active', observedAt:new Date(now()).toISOString(), worlds:researchWorlds(raw, 10),
++  }), 60_000);
+ }
++
++export async function worldResearchPage(env: Env, pool: string | null, page: string | null) {
++  const tags = new Map([['games', 'author_tag_game'], ['hangouts', 'author_tag_social,author_tag_hangout']]);
++  if (!pool || (pool !== 'active' && pool !== 'published' && !tags.has(pool))) throw new HttpError(400, 'Unknown world pool.');
++  if (page !== '1' && (page !== '2' || pool === 'published')) throw new HttpError(400, 'Invalid world page.');
++  const published = pool === 'published';
++  const limit = published ? 50 : 100;
++  const offset = (Number(page) - 1) * limit;
++  const sort = published ? 'publicationDate' : 'popularity';
++  const parameters = new URLSearchParams({releaseStatus:'public', sort, order:'descending', n:String(limit), offset:String(offset)});
++  const tag = tags.get(pool);
++  if (tag) parameters.set('tag', tag);
++  const path = published ? '/worlds' : '/worlds/active';
++  return vrchatGet(env, `${path}?${parameters}`, raw => ({
++    version:2, pool, sort, page:Number(page), limit, offset, observedAt:new Date(now()).toISOString(),
++    worlds:researchWorlds(raw, limit),
++  }), 60_000);
++}
++
+ export async function resolveProfiles(env: Env, input: unknown) {
+   const parsed = parseProfileInput(input);
+   const value = await vrchatGet(env, parsed.id ? `/users/${parsed.id}` : `/users?search=${encodeURIComponent(parsed.search!)}&n=10`);

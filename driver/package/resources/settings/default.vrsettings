@@ -1,0 +1,15 @@
+{
+  "driver_desktopbody": {
+    "enable": false
+  },
+  "trackers": {
+    "/devices/desktopbody/DB-WAIST": "TrackerRole_Waist",
+    "/devices/desktopbody/DB-CHEST": "TrackerRole_Chest",
+    "/devices/desktopbody/DB-LEFT-FOOT": "TrackerRole_LeftFoot",
+    "/devices/desktopbody/DB-LEFT-ELBOW": "TrackerRole_LeftElbow",
+    "/devices/desktopbody/DB-LEFT-KNEE": "TrackerRole_LeftKnee",
+    "/devices/desktopbody/DB-RIGHT-FOOT": "TrackerRole_RightFoot",
+    "/devices/desktopbody/DB-RIGHT-ELBOW": "TrackerRole_RightElbow",
+    "/devices/desktopbody/DB-RIGHT-KNEE": "TrackerRole_RightKnee"
+  }
+}

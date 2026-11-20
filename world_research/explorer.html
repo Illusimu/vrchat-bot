@@ -1,0 +1,171 @@
+<section id="world-research-ui" aria-label="VRChat world research">
+  <header><strong>World research</strong><span id="wr-fresh"></span></header>
+  <nav aria-label="Research views">
+    <button data-view="launch">Launch timing</button><button data-view="topics">Topic changes</button>
+    <button data-view="worlds">World search</button><button data-view="flags">Investigations</button>
+  </nav>
+  <main><h2 id="wr-heading"></h2><p id="wr-note"></p>
+    <div id="wr-controls"></div><div id="wr-results" aria-live="polite"></div>
+  </main>
+</section>
+<style>
+#world-research-ui{color-scheme:light dark;--paper:light-dark(#fafaf7,#191e21);--ink:light-dark(#202e32,#eef4f2);--soft:light-dark(#526665,#adbfbc);--rule:light-dark(#d7e0dc,#394744);--accent:light-dark(#14564f,#a4e3d3);background:var(--paper);color:var(--ink);font:15px/1.48 "Inter","Segoe UI",sans-serif;max-width:1100px;margin:auto;border:1px solid var(--rule);border-radius:12px;overflow:hidden}
+#world-research-ui header,#world-research-ui nav,#world-research-ui main{padding:16px clamp(12px,3vw,30px)}
+#world-research-ui header{display:flex;align-items:center;flex-wrap:wrap;gap:8px 22px;border-bottom:1px solid var(--rule)}
+#world-research-ui header strong{font-size:20px}#world-research-ui header span,#world-research-ui p,#world-research-ui small{color:var(--soft)}
+#world-research-ui nav{display:flex;gap:6px;flex-wrap:wrap;padding-block:9px;border-bottom:1px solid var(--rule)}
+#world-research-ui button,#world-research-ui input,#world-research-ui select{font:inherit;color:inherit;background:var(--paper);border:1px solid var(--rule);border-radius:6px;padding:7px 10px;max-width:100%;box-sizing:border-box}
+#world-research-ui button{cursor:pointer}#world-research-ui nav button{border-color:transparent}#world-research-ui button[aria-pressed=true]{color:var(--paper);background:var(--accent)}
+#world-research-ui main{display:grid;gap:12px}#world-research-ui h2,#world-research-ui h3,#world-research-ui p{margin:0}#world-research-ui h2{font:500 clamp(22px,4vw,32px)/1.2 Georgia,serif}#world-research-ui h3{font-size:16px;margin-top:14px}
+#wr-controls{display:flex;flex-wrap:wrap;gap:10px 14px}#wr-controls label{display:grid;gap:3px;color:var(--soft);font-size:13px;max-width:100%}#wr-controls select,#wr-controls input{color:var(--ink);font-size:15px}
+#wr-results{display:grid;gap:9px}#wr-results .wr-scroll{overflow:auto}#wr-results table{width:100%;border-collapse:collapse;text-align:left;font-variant-numeric:tabular-nums}
+#wr-results th,#wr-results td{padding:8px;border-bottom:1px solid var(--rule);vertical-align:top}#wr-results th{color:var(--soft);font-size:13px;font-weight:500}
+#wr-results .open{border:0;padding:2px 0;color:var(--accent);text-decoration:underline;text-underline-offset:3px;text-align:left}
+#wr-results .pager{display:flex;gap:8px;align-items:center}#wr-results .hint{padding:10px 12px;background:light-dark(#eaf1ed,#25332f);border-radius:6px}
+@media(pointer:coarse){#world-research-ui button,#world-research-ui select,#world-research-ui input,#wr-results .open{min-height:44px}}
+</style>
+<script type="application/json" id="wr-json">__RESEARCH_DATA__</script>
+<script>
+(() => {
+  const root=document.getElementById('world-research-ui'), get=id=>root.querySelector('#wr-'+id);
+  const data=JSON.parse(document.getElementById('wr-json').textContent);
+  const {runs,worlds,launches,dates,flags}=data;
+  const available=runs.map(r=>String(r[0]));
+  const defaultState={view:'launch',phase:'labs',measure:'players',goal:'20',hours:'24',day:'All days',window:'all',search:'',pool:'All pools',tag:'All tags',end:available[0],start:available[1],sort:'Players',page:0,selected:'',reason:'All reasons'};
+  let state={...defaultState};
+  const names={launch:'When do launches find an audience?',topics:'Which topics gained players?',worlds:'Search the observed worlds',flags:'Which worlds merit a visit?'};
+  const notes={launch:'Compare launch windows over the past 90 days. Select what counts as engagement and how quickly you want to see it.',topics:'Compare the same tagged worlds in two sweeps. Open a topic to inspect its contributors.',worlds:'Search by name or world ID. The detail view includes measurements from the latest 12 sampled runs.',flags:'Review the recorded reason, evidence and visit stage for each flagged world.'};
+  const dateFmt=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+  const date=t=>t?dateFmt.format(new Date(t)):'Unknown';
+  const localParts=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',weekday:'short',hour:'2-digit',hourCycle:'h23'});
+  function postingTime(ts){
+    const parts=Object.fromEntries(localParts.formatToParts(new Date(ts)).map(p=>[p.type,p.value]));
+    return {day:parts.weekday,bin:Math.floor(Number(parts.hour)/4)}
+  }
+  const fmt=n=>n==null?'—':Number(n).toLocaleString('en-US',{maximumFractionDigits:1});
+  const signed=n=>n==null?'—':(n>0?'+':'')+fmt(n);
+  const median=xs=>{if(!xs.length)return null;const a=[...xs].sort((x,y)=>x-y);return (a[(a.length-1)>>1]+a[a.length>>1])/2};
+  const weekdays=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const windows=['Midnight–4 am','4–8 am','8 am–noon','Noon–4 pm','4–8 pm','8 pm–midnight'];
+  const el=(type,value)=>{const x=document.createElement(type);if(value!=null)x.textContent=value;return x};
+  const results=get('results'), controls=get('controls');
+  function save(){window.openai?.setWidgetState?.({modelContent:{view:state.view,phase:state.phase,measure:state.measure,target:state.goal,withinHours:state.hours},privateContent:{...state}})?.catch(()=>{})}
+  function change(patch){Object.assign(state,{page:0,selected:''},patch);render();save()}
+  function pick(label,key,opts){
+    const l=el('label',label),s=el('select');
+    for(const entry of opts){const [v,t]=Array.isArray(entry)?entry:[entry,entry];s.add(new Option(t,v))}
+    if(![...s.options].some(o=>o.value===String(state[key])))state[key]=s.options[0]?.value;
+    s.value=state[key];s.onchange=()=>change({[key]:s.value,...(key==='phase'||key==='day'?{window:'all'}:{})});
+    l.append(s);controls.append(l)
+  }
+  function button(title,action,cls){const b=el('button',title);if(cls)b.className=cls;b.onclick=action;return b}
+  function message(text){const p=el('p',text);p.className='hint';results.append(p)}
+  function table(headers,rows){
+    const wrap=el('div'),t=el('table'),h=el('tr');wrap.className='wr-scroll';headers.forEach(v=>h.append(el('th',v)));t.createTHead().append(h);
+    const body=t.createTBody();for(const row of rows){const tr=el('tr');for(const v of row){const td=el('td');if(v instanceof Node)td.append(v);else td.textContent=v;tr.append(td)}body.append(tr)}
+    wrap.append(t);results.append(wrap)
+  }
+  function paged(items,headers,row){
+    const n=15, last=Math.max(0,Math.ceil(items.length/n)-1);
+    const page=Math.min(Math.max(0,Number(state.page)||0),last);
+    table(headers,items.slice(page*n,(page+1)*n).map(row));
+    if(items.length>n){const p=el('div');p.className='pager';
+      for(const [title,step] of [['Previous',-1],['Next',1]]){const b=button(title,()=>change({page:page+step}));b.disabled=page+step<0||page+step>last;p.append(b)}
+      p.append(el('small',`Page ${page+1} of ${last+1}`));results.append(p)}
+  }
+  function openWorld(id,name){return button(name,()=>{state.selected=id;render();save();get('detail')?.scrollIntoView?.({block:'nearest'})},'open')}
+  function detail(){
+    if(!state.selected)return;const w=worlds[state.selected],flag=flags.find(f=>f.world_id===state.selected);
+    const title=el('h3',w?.name||flag?.name||launches.find(l=>l.id===state.selected)?.name||state.selected);title.id='wr-detail';results.append(title);
+    if(w){table(['Observed · Central','Players','Total visits','Favorites','Found in'],Object.values(w.samples).sort((a,b)=>b.t.localeCompare(a.t)).map(s=>[date(s.t),fmt(s.p),fmt(s.v),fmt(s.f),s.pools.join(', ')]))}
+    else message('This world has no measurements in the latest 12 runs.');
+    if(state.view==='launch'){
+      const launch=launches.find(l=>l.id===state.selected&&l.phase===state.phase);
+      if(launch?.samples.length){results.append(el('h3','First 50 hours after release'));table(['Hours since release','Observed players','Total visits','Favorites'],launch.samples.map(s=>s.map(fmt)))}
+    }
+    if(flag)for(const r of flag.reasons)results.append(el('p',r.summary));
+  }
+  function timing(){
+    pick('Release milestone','phase',[['labs','Community Labs'],['public','Public release']]);
+    pick('Engagement measure','measure',[['players','Concurrent players'],['visits','Visits gained'],['favorites','Net favorites gained']]);
+    pick('Target','goal',['5','10','20','50']);pick('Hours after release','hours',['6','12','24','48']);
+    pick('Posting day · Central','day',['All days',...weekdays]);
+    const matchesDay=l=>state.day==='All days'||l.day===state.day;
+    const known=dates.filter(([phase])=>phase===state.phase).map(([,ts])=>postingTime(ts)).filter(matchesDay);
+    const rows=launches.filter(l=>l.phase===state.phase).map(l=>{
+      const idx={players:1,visits:2,favorites:3}[state.measure];
+      const h=Number(state.hours),measured=l.samples.filter(s=>s[0]>=0&&s[0]<=h&&s[idx]!=null);
+      const baseline=state.measure==='players'?0:(measured.length&&measured[0][0]<=2?measured[0][idx]:null);
+      const samples=baseline==null?[]:measured.map(s=>[s[0],s[idx]-baseline]);
+      const hit=samples.find(([,p])=>p>=Number(state.goal));
+      const gaps=[0,...samples.map(s=>s[0]),h];
+      const elapsed=runs.length?(Date.parse(runs[0][1])-Date.parse(l.t))/3600000:0;
+      const covered=elapsed>=h&&samples.length>0&&gaps.slice(1).every((v,i)=>v-gaps[i]<=3);
+      return {...l,...postingTime(l.t),hit:hit?.[0]??null,covered}
+    }).filter(matchesDay);
+    const coveredWindows=new Set(rows.filter(l=>l.hit!=null||l.covered).map(l=>l.bin)).size;
+    message(`${fmt(known.length)} recorded releases · ${rows.length} enrolled for follow-up. ${coveredWindows<2?'Too few measured windows to compare posting times.':'Compare sample sizes and coverage before choosing a time.'}`);
+    table(['Posting window · Central','Known releases','Enrolled','Observed hits¹','Below target in scans','Incomplete','Median time to hit'],windows.map((label,i)=>{
+      const group=rows.filter(l=>l.bin===i),hits=group.filter(l=>l.hit!=null),below=group.filter(l=>l.hit==null&&l.covered);
+      const rate=group.length?' ('+Math.round(100*hits.length/group.length)+'%)':'';
+      return [button(label,()=>change({window:String(i)}),'open'),fmt(known.filter(l=>l.bin===i).length),fmt(group.length),fmt(hits.length)+rate,fmt(below.length),fmt(group.length-hits.length-below.length),hits.length?fmt(median(hits.map(l=>l.hit)))+' h':'—']
+    }));
+    results.append(el('small','¹ Share of all enrolled launches with a recorded hit. Incomplete follow-up can lower this share. Below target requires samples across the window with gaps of three hours or less. Two-hour sampling can miss short spikes. The median includes observed hits.'));
+    if(state.measure!=='players')results.append(el('small','Gains use the first measured total within two hours of release as the baseline. Earlier engagement is unknown. Launches missing a baseline have incomplete follow-up.'));
+    const group=rows.filter(l=>state.window==='all'||String(l.bin)===state.window);
+    results.append(el('h3',(state.window==='all'?'Enrolled launches':windows[Number(state.window)])+' · '+group.length));
+    if(state.window!=='all')results.append(button('Show all posting windows',()=>change({window:'all'}),'open'));
+    if(group.length)paged(group,['World','Released · Central','Outcome'],l=>[openWorld(l.id,l.name),date(l.t),l.hit!=null?'Reached in '+fmt(l.hit)+' h':l.covered?'Below target in scans':'Incomplete follow-up']);
+  }
+  function runOptions(){return runs.map(([id,t])=>[String(id),date(t)+' · #'+id])}
+  function search(){
+    pick('Sweep · Central','end',runOptions());
+    const entries=Object.entries(worlds).filter(([,w])=>w.samples[state.end]);
+    const options=k=>[...new Set(entries.flatMap(([,w])=>w.samples[state.end][k]))].sort();
+    pick('Found in','pool',['All pools',...options('pools')]);pick('Creator tag','tag',['All tags',...options('tags')]);
+    pick('Sort by','sort',['Players','Favorites','Visits','World name']);
+    const l=el('label','World name or ID'),box=el('input');box.type='search';box.value=state.search;l.append(box);controls.append(l);
+    function list(){
+      results.replaceChildren();const txt=state.search.trim().toLowerCase();
+      const xs=entries.filter(([id,w])=>{const s=w.samples[state.end];return (w.name.toLowerCase().includes(txt)||id.includes(txt))&&(state.pool==='All pools'||s.pools.includes(state.pool))&&(state.tag==='All tags'||s.tags.includes(state.tag))});
+      const key={Players:'p',Favorites:'f',Visits:'v'}[state.sort];
+      xs.sort((a,b)=>(key?(b[1].samples[state.end][key]??-1)-(a[1].samples[state.end][key]??-1):0)||a[1].name.localeCompare(b[1].name));
+      results.append(el('h3',fmt(xs.length)+' matching worlds'));
+      paged(xs,['World','Players','Favorites','Visits'],([id,w])=>{const s=w.samples[state.end];return [openWorld(id,w.name),fmt(s.p),fmt(s.f),fmt(s.v)]})
+    }
+    box.oninput=()=>{state.search=box.value;state.page=0;state.selected='';list();save()};list()
+  }
+  function topics(){
+    const opts=runOptions();pick('Later sweep · Central','end',opts);pick('Earlier sweep · Central','start',opts.filter(([id])=>Number(id)<Number(state.end)));
+    if(!state.start){message('Select a later sweep to compare two observations.');return}
+    const buckets=new Map();
+    for(const [id,w] of Object.entries(worlds)){
+      const a=w.samples[state.start],b=w.samples[state.end];if(a?.p==null||b?.p==null)continue;
+      for(const tag of new Set(b.tags.filter(t=>a.tags.includes(t)))){if(!buckets.has(tag))buckets.set(tag,[]);buckets.get(tag).push({id,w,d:b.p-a.p})}
+    }
+    const rows=[...buckets].map(([tag,items])=>({tag,items,total:items.reduce((v,i)=>v+i.d,0),typical:median(items.map(i=>i.d))})).sort((a,b)=>b.total-a.total);
+    pick('Direction','direction',['Gains first','Declines first']);if(state.direction==='Declines first')rows.reverse();
+    results.append(el('small','A world can contribute to multiple topics. Changes cover matched worlds carrying the tag in both sweeps.'));
+    paged(rows,['Creator tag','Matched worlds','Player change','Median world change'],r=>[button(r.tag,()=>change({topic:r.tag}),'open'),fmt(r.items.length),signed(r.total),signed(r.typical)]);
+    const row=rows.find(r=>r.tag===state.topic);
+    if(row){results.append(el('h3',row.tag+' · largest changes'));table(['World','Player change'],[...row.items].sort((a,b)=>Math.abs(b.d)-Math.abs(a.d)).slice(0,10).map(i=>[openWorld(i.id,i.w.name),signed(i.d)]))}
+  }
+  function investigations(){
+    const kinds=[...new Set(flags.flatMap(f=>f.reasons.map(r=>r.kind)))].sort();
+    pick('Reason','reason',['All reasons',...kinds]);const rows=flags.filter(f=>state.reason==='All reasons'||f.reasons.some(r=>r.kind===state.reason));
+    if(!rows.length){message('No worlds currently match this investigation queue.');return}
+    paged(rows,['World','Stage','Evidence'],f=>[openWorld(f.world_id,f.name),f.stage.replaceAll('_',' '),f.reasons.map(r=>r.summary).join(' · ')])
+  }
+  function render(){
+    const v=state.view;if(!Object.hasOwn(names,v))state.view='launch';
+    get('fresh').textContent=runs.length?'Latest sample · '+date(runs[0][1])+' Central':'Awaiting first sweep';
+    get('heading').textContent=names[state.view];get('note').textContent=notes[state.view];
+    for(const b of root.querySelectorAll('nav button'))b.setAttribute('aria-pressed',String(b.dataset.view===state.view));
+    controls.replaceChildren();results.replaceChildren();({launch:timing,topics,worlds:search,flags:investigations})[state.view]();detail()
+  }
+  function restore(saved){state={...defaultState,...saved?.privateContent};render()}
+  for(const b of root.querySelectorAll('nav button'))b.onclick=()=>change({view:b.dataset.view});
+  restore(window.openai?.widgetState);
+  window.addEventListener('openai:set_globals',e=>{if(e.detail?.globals?.widgetState)restore(e.detail.globals.widgetState)})
+})();
+</script>

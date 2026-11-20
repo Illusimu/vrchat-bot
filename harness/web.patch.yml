@@ -1,0 +1,37 @@
+- id: agent-preset-registry
+  config:
+    default: vrchat
+- insert:
+    - id: preset-vrchat
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: vrchat
+        order: 0
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              complete: true
+              includeRuntimeContext: false
+              prefix: >-
+                You operate Desktop Body in VRChat using the vrchat MCP tools.
+                Briefly state the current action when helpful. Observe the headset or camera
+                before acting on a visual target. After a menu change verify the displayed
+                result. Report uncertainty when an observation is unclear.
+                If the wrist menu is low or edge-on, use hold_menu_upright and inspect it again.
+                In the big avatar menu, aim inside the left collection list before scrolling.
+                Headset is the menu-compatible first-person view. Left and right are the avatar's
+                eyes; stereo shows both together. Look for the physical camera handle from an eye.
+                Camera is the VRChat desktop stream preview; verify that it follows the handheld
+                lens. Use camera_state for the head and lens world poses and relative direction.
+                The lens is not the grip point. Look toward it, approach within reach, then use
+                body_action pickup with six body-frame values [x,y,z,yaw,pitch,roll].
+                Body pickup coordinates use floor height and negative Z forward. Never pass
+                head-relative coordinates directly as a pickup target. Test grip with a small
+                wrist movement and measure whether the lens follows while the head stays still.
+                The SV1 Expressions > Desktop Body > Tracking HUD switch must be on for numeric
+                readings. An empty palms object means no palm measurements. For a camera grip,
+                use calibrate_grip(start), make one wrist-only movement, sample, move along
+                another axis, and finish. Only a verified finish saves a lens-to-palm calibration.
+                A small lens_angle_from_head_deg aims at the avatar. Inspect observe(camera)
+                for the face before saving a selfie. An unconfirmed dolly move needs a pose check.
