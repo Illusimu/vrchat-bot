@@ -1,4 +1,4 @@
-"""Local OpenVR targets for short, symmetric full-body exercises."""
+"""Local OpenVR targets for short full-body exercises."""
 import math
 
 
@@ -19,25 +19,35 @@ def symmetric(head,hand,hip,foot):
     return [head,mirror(hand),hand,hip,mirror(foot),foot]
 
 
-def exercise(name,t):
+def exercise(name, t, repetitions=None):
     stand=symmetric((0,1.65,0,0,0),(.32,1.15,-.30,0,0),(0,.95,0,0,0),(.13,.06,0,0,0))
     squat=symmetric((0,1.34,-.14,-15,0),(.32,.92,.09,15,0),(0,.69,.09,-18,0),(.13,.06,0,0,0))
+    if name == "leg-lift":
+        raised = stand.copy()
+        raised[4] = (-.13, .32, -.22, 0, 0)
+        return blend(stand, raised, smooth(min(t, 1 - t) / .32))
     if name=="jumping-jacks":
-        spread=math.sin(2*math.pi*t)**2
-        bounce=.11*abs(math.sin(4*math.pi*t))
+        count = 2 if repetitions is None else repetitions
+        spread=math.sin(count*math.pi*t)**2
+        bounce=.11*abs(math.sin(2*count*math.pi*t))
         arc=math.radians(-75+150*spread)
         hand=(.19+.57*math.cos(arc),1.38+.57*math.sin(arc),-.06,0,145*spread)
         p=symmetric((0,1.65,0,0,0),hand,(0,.95,0,0,0),(.13+.25*spread,.06,0,0,0))
         p=[(x,y+bounce,z,a,r) for x,y,z,a,r in p]
         return blend(stand,p,smooth(min(t,1-t)/.09))
     if name=="push-ups":
+        count = 3 if repetitions is None else repetitions
         hands=(.24,.09,-.62,-72,0)
         plank=symmetric((0,.74,-.69,-66,0),hands,(0,.46,-.04,-68,0),(.13,.09,.76,-65,0))
         low=symmetric((0,.35,-.72,-82,0),hands,(0,.25,-.04,-80,0),(.13,.09,.76,-65,0))
-        enter=min(t,1-t)
-        if enter<.10:return blend(stand,squat,smooth(enter/.10))
-        if enter<.24:return blend(squat,plank,smooth((enter-.10)/.14))
-        return blend(plank,low,math.sin(2*math.pi*(t-.24)/.52)**2)
+        timing_scale = .48 + .52 * count / 3
+        enter = min(t, 1 - t) * timing_scale
+        if enter < .10:
+            return blend(stand, squat, smooth(enter / .10))
+        if enter < .24:
+            return blend(squat, plank, smooth((enter - .10) / .14))
+        cycle = (t * timing_scale - .24) / (.52 / 3)
+        return blend(plank, low, math.sin(math.pi * cycle)**2)
     if t<.20:return blend(stand,squat,smooth(t/.20))
     if t>.80:return blend(squat,stand,smooth((t-.80)/.20))
     air=(t-.20)/.60

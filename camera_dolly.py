@@ -1,29 +1,60 @@
 """Send player-local camera endpoints to VRChat's camera dolly."""
+from array import array
 import json
 import math
 import socket
+import time
+from urllib.error import HTTPError
 import urllib.request
 import psutil
 
+from PIL import Image
 from pythonosc.osc_packet import OscPacket, ParseError
 from pythonosc.osc_message_builder import OscMessageBuilder
 
 
 class CameraDolly:
-    def __init__(self):
+    def __init__(self, *, spout=False):
         self.url = self.find_client()
         self.original_mode, self.original_stream = self.mode()
+        self.spout = spout
+        self.receiver = None
+        self.buffer = None
+        if spout:
+            if self.original_mode == 0 and not self.original_stream:
+                raise ValueError("Open Photo Camera in VRChat before connecting the Spout feed")
+            try:
+                import SpoutGL
+            except ImportError as error:
+                raise ValueError("Install SpoutGL in the pilot environment to use its game-mirror camera") from error
+            self.receiver_type = SpoutGL.SpoutReceiver
+        self.has_dolly = self.dolly_available(self.url)
         self.input = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            self.input.bind(("127.0.0.1", 9001))
-        except OSError:
+            if self.has_dolly:
+                self.input.bind(("127.0.0.1", 9001))
+        except OSError as error:
             self.input.close()
-            raise ValueError("Camera feedback port 9001 is occupied")
+            raise ValueError("Camera feedback port 9001 is occupied") from error
         self.input.setblocking(False)
         self.last = None
         self.phase = None
+        if not self.stream_ready(self.original_mode, self.original_stream):
+            self.enable_stream()
+
+    def enable_stream(self):
         self.send("/usercamera/Mode", 2)
-        self.send("/usercamera/Streaming", False)
+        self.send("/usercamera/Streaming", self.spout)
+
+    @staticmethod
+    def dolly_available(url):
+        try:
+            with urllib.request.urlopen(url + "/dolly", timeout=.6) as reply:
+                return "Play" in json.load(reply).get("CONTENTS", {})
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            return False
 
     @staticmethod
     def find_client():
@@ -43,15 +74,77 @@ class CameraDolly:
         raise ValueError("Enable OSC in VRChat to connect its stream camera")
 
     def mode(self):
-        with urllib.request.urlopen(self.url + "/usercamera", timeout=.6) as reply:
-            info = json.load(reply)["CONTENTS"]
+        return self.query_mode(self.url)
+
+    def stream_ready(self, mode, streaming):
+        if self.spout:
+            # VRChat can keep publishing the fixed feed with the viewfinder closed.
+            return streaming and mode in (0, 2)
+        return mode == 2 and not streaming
+
+    def zoom(self):
+        with urllib.request.urlopen(self.url + "/usercamera/Zoom", timeout=.6) as reply:
+            return float(json.load(reply)["VALUE"][0])
+
+    @staticmethod
+    def query_settings(url):
+        with urllib.request.urlopen(url + "/usercamera", timeout=.6) as reply:
+            return json.load(reply)["CONTENTS"]
+
+    @staticmethod
+    def query_mode(url):
+        info = CameraDolly.query_settings(url)
         return info["Mode"]["VALUE"][0], info["Streaming"]["VALUE"][0]
 
+    @staticmethod
+    def query_flying(url):
+        with urllib.request.urlopen(url + "/usercamera/Flying", timeout=.6) as reply:
+            state = json.load(reply)
+        if state.get("ACCESS", 0) & 3 != 3:
+            raise ValueError("VRChat did not expose read/write flight controls.")
+        return bool(state["VALUE"][0])
+
+    @staticmethod
+    def send_flying(enabled):
+        message = OscMessageBuilder(address="/usercamera/Flying")
+        message.add_arg(enabled)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as output:
+            output.sendto(message.build().dgram, ("127.0.0.1", 9000))
+
     def observe(self):
+        if not self.stream_ready(*self.mode()):
+            raise ValueError("Waiting for VRChat Stream mode and the selected capture source")
+        if self.spout:
+            return self.observe_spout()
         from vr_agent import observe
-        if self.mode() != (2, False):
-            raise ValueError("Waiting for VRChat Stream mode with Spout off")
         return observe(stream=True)
+
+    def observe_spout(self):
+        # Call on a dedicated worker so the receiver keeps its graphics context.
+        if self.receiver is None:
+            receiver = self.receiver_type()
+            receiver.__enter__()
+            self.receiver = receiver
+            self.receiver.setReceiverName("VRCSender1")
+        sink = self.receiver
+        deadline = time.monotonic() + .25
+        while time.monotonic() < deadline:
+            received = sink.receiveImage(self.buffer, 6408, False, 0)  # GL_RGBA
+            if sink.isUpdated():
+                self.size = (sink.getSenderWidth(), sink.getSenderHeight())
+                self.buffer = array("B", [0]) * (self.size[0] * self.size[1] * 4)
+            elif received and self.buffer and sink.isFrameNew():
+                frame = Image.frombytes("RGBA", self.size, self.buffer.tobytes()).convert("RGB")
+                if max(high for _, high in frame.getextrema()) > 16:
+                    return frame
+            time.sleep(.02)
+        raise ValueError("Waiting for a fresh VRChat camera image over Spout")
+
+    def close_receiver(self):
+        if self.receiver is not None:
+            self.receiver.__exit__(None, None, None)
+            self.receiver = None
+            self.buffer = None
 
     def send(self, address, value):
         msg = OscMessageBuilder(address=address)
@@ -84,6 +177,8 @@ class CameraDolly:
                 continue
 
     def start(self, values, now):
+        if not self.has_dolly:
+            raise ValueError("VRChat Camera Dolly controls are unavailable. The camera feed is still available for observation.")
         self.idle()
         if self.phase:
             self.send("/dolly/Play", False)
@@ -103,6 +198,8 @@ class CameraDolly:
         self.started = now
 
     def idle(self):
+        if not self.has_dolly:
+            return
         for playing in self.events():
             if self.phase == "holding" and not playing:
                 self.phase = None

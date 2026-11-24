@@ -6,6 +6,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'hosted-origin.ps1')
+$baseUri = Get-WorldResearchBaseUri
 $workspace = Split-Path -Parent $PSScriptRoot
 $token = (Get-Content -LiteralPath (Join-Path $workspace '.world-research-token') -Raw).Trim() | ConvertTo-SecureString
 if (Test-Path -LiteralPath $OutputPath) { throw 'Choose a new output path for each pilot.' }
@@ -23,7 +25,7 @@ foreach ($query in $queries) {
         Write-Output "Skipped $pool page 2 after evaluating page 1."
         continue
     }
-    $uri = "https://escapethroughreality.com/api/world-research/page?pool=$pool&page=$page"
+    $uri = "$baseUri/page?pool=$pool&page=$page"
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $delay = ($nextRequest - [DateTimeOffset]::UtcNow).TotalSeconds
         if ($delay -gt 0) { Start-Sleep -Seconds ([Math]::Ceiling($delay)) }

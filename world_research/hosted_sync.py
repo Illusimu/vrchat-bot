@@ -2,6 +2,7 @@ import argparse
 import ctypes
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -11,7 +12,7 @@ from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from collector import DEFAULT_DB, SCHEMA, save_world, timestamp, world_id
@@ -19,7 +20,7 @@ from investigations import add_candidates, refresh_details
 from pilot_report import POOLS, page_target, store_page, utc_timestamp, validate_page, validate_world
 
 
-BASE_URL = "https://escapethroughreality.com/api/world-research"
+DEFAULT_ORIGIN = "https://escapethroughreality.com"
 TOKEN_PATH = SCHEMA.parent.parent / ".world-research-token"
 MAX_BATCH_BYTES = 1_500_000
 LOG = logging.getLogger("world-history")
@@ -60,14 +61,21 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class HostedBuffer:
-    def __init__(self, token):
+    def __init__(self, token, origin=None):
+        origin = origin or os.environ.get("WORLD_RESEARCH_ORIGIN") or DEFAULT_ORIGIN
+        location = urlsplit(origin)
+        if (re.search(r"[\s\\]", origin) or location.scheme != "https" or not location.hostname
+                or location.username is not None or location.path not in ("", "/")
+                or location.query or location.fragment):
+            raise ValueError("WORLD_RESEARCH_ORIGIN must be an HTTPS origin without a path")
+        self.base_url = f"https://{location.netloc}/api/world-research"
         self.headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
-                        "User-Agent": "EscapeThroughRealityWorldSync/1.0 (+https://escapethroughreality.com)"}
+                        "User-Agent": "VRChatWorldResearchSync/1.0 (+https://github.com/Illusimu/vrchat-bot)"}
         self.opener = build_opener(NoRedirect())
 
     def details(self, world):
         query = urlencode({"id": world})
-        request = Request(f"{BASE_URL}/details?{query}", headers=self.headers)
+        request = Request(f"{self.base_url}/details?{query}", headers=self.headers)
         with self.opener.open(request, timeout=30) as response:
             content = response.read(256_001)
             if len(content) > 256_000:
@@ -76,7 +84,7 @@ class HostedBuffer:
 
     def next(self, after=None):
         query = f"?after={after}" if after is not None else ""
-        request = Request(f"{BASE_URL}/sync/next{query}", headers=self.headers)
+        request = Request(f"{self.base_url}/sync/next{query}", headers=self.headers)
         with self.opener.open(request, timeout=30) as response:
             if response.status == 204:
                 return None
@@ -90,7 +98,7 @@ class HostedBuffer:
 
     def acknowledge(self, sequence, batch_id):
         query = urlencode({"sequence": sequence, "id": batch_id})
-        request = Request(f"{BASE_URL}/sync/ack?{query}", data=b"", headers=self.headers, method="POST")
+        request = Request(f"{self.base_url}/sync/ack?{query}", data=b"", headers=self.headers, method="POST")
         with self.opener.open(request, timeout=30) as response:
             if response.status != 200:
                 raise ValueError("hosted batch was not acknowledged")
@@ -241,6 +249,7 @@ def sync(db, buffer, replay):
 def main():
     parser = argparse.ArgumentParser(description="Sync the hosted VRChat buffer into the local world history.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--origin", help="HTTPS origin of the research Worker")
     parser.add_argument("--replay", action="store_true", help="include recently acknowledged batches still hosted")
     parser.add_argument("--log", type=Path, help="write a rotating local log")
     parser.add_argument("--skip-investigations", action="store_true", help="only import hosted world scans")
@@ -250,7 +259,7 @@ def main():
         handlers.append(logging.StreamHandler())
     logging.basicConfig(level=logging.INFO, handlers=handlers, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        buffer = HostedBuffer(load_token(TOKEN_PATH))
+        buffer = HostedBuffer(load_token(TOKEN_PATH), origin=args.origin)
         args.db.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(args.db, timeout=30)) as db:
             db.executescript(SCHEMA.read_text(encoding="utf-8"))

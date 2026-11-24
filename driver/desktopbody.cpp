@@ -89,6 +89,12 @@ public:
             props->SetBoolProperty(container, vr::Prop_DisplayDebugMode_Bool, true);
             props->SetBoolProperty(container, vr::Prop_IsOnDesktop_Bool, true);
             props->SetStringProperty(container, vr::Prop_DriverProvidedChaperoneJson_String, chaperone);
+            if (vr::VRDriverInput()->CreateBooleanComponent(container, "/proximity", &proximity)
+                == vr::VRInputError_None) {
+                props->SetBoolProperty(container, vr::Prop_ContainsProximitySensor_Bool, true);
+            } else {
+                vr::VRDriverLog()->Log("Desktop Body: could not create headset proximity input");
+            }
             break;
         case vr::TrackedDeviceClass_Controller:
             if (!ActivateHand(container)) {
@@ -108,7 +114,11 @@ public:
         return vr::VRInitError_None;
     }
 
-    void Deactivate() override { index = vr::k_unTrackedDeviceIndexInvalid; }
+    void Deactivate() override {
+        index = vr::k_unTrackedDeviceIndexInvalid;
+        proximity = vr::k_ulInvalidInputComponentHandle;
+        pilotPresent = false;
+    }
     void EnterStandby() override {}
     void DebugRequest(const char*, char* response, uint32_t length) override {
         if (length) response[0] = '\0';
@@ -123,6 +133,14 @@ public:
 
     void PublishPose(const float* values, Clock::time_point stamp, Clock::time_point now) {
         if (index == vr::k_unTrackedDeviceIndexInvalid) return;
+        if (proximity != vr::k_ulInvalidInputComponentHandle) {
+            // A steady simulated head still represents someone using the rig.
+            const bool present = stamp != Clock::time_point{} && now - stamp < inputTimeout;
+            if (present != pilotPresent &&
+                vr::VRDriverInput()->UpdateBooleanComponent(proximity, present, 0) == vr::VRInputError_None) {
+                pilotPresent = present;
+            }
+        }
         vr::DriverPose_t pose{};
         std::copy_n(values, 3, pose.vecPosition);
         const double norm = std::sqrt(values[3] * values[3] + values[4] * values[4] +
@@ -212,6 +230,8 @@ private:
     const vr::ETrackedControllerRole role;
     Display display;
     MyHandSimulation hand;
+    vr::VRInputComponentHandle_t proximity = vr::k_ulInvalidInputComponentHandle;
+    bool pilotPresent = false;
     vr::VRInputComponentHandle_t skeleton = vr::k_ulInvalidInputComponentHandle;
     std::array<Component, 13> components{{
         {"/input/thumbstick/x", false, true}, {"/input/thumbstick/y", false, true},

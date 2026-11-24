@@ -27,6 +27,11 @@ def room_event(message, pending, current):
         world, instance = match.groups()
         pending["world_id"] = world
         pending["instance_key"] = hashlib.sha256((world+":"+instance).encode()).hexdigest()[:24]
+        number = instance.split("~", 1)[0]
+        if number.isdecimal():
+            pending["instance_number"] = number
+        if "~private(" in instance and "~canRequestInvite" not in instance:
+            pending["access"] = "invite"
     elif message == "Successfully joined room" and "world_id" in pending:
         current.update(pending)
         current["scene_ready"] = False

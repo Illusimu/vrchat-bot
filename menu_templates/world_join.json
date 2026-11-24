@@ -1,0 +1,84 @@
+{
+  "screens": {
+    "worlds": ["worlds_search"],
+    "search_input": ["world_input", "world_paste", "world_submit"],
+    "search_filled": ["world_input", "{input}", "world_submit"],
+    "search_results": ["world_results"],
+    "world_details": ["{details}"],
+    "create_instance": ["world_create", "world_invite_choice"],
+    "instance_created": ["world_created", "{privacy}"]
+  },
+  "steps": [
+    {"from": "worlds", "control": "worlds_search", "to": "search_input", "aim": [0.382, 0.078], "center": [190, 365], "radius": [19, 8], "center_view": true, "mirror_aim": [0.532, 0.319], "mirror_center": [0.48, 0.785], "mirror_radius": [19, 12], "mirror_after_view": [15, -12]},
+    {"from": "search_input", "control": "world_paste", "to": "search_filled", "aim": [0.377, 0.268], "center": [205, 456], "radius": [10, 8], "relative_to": ["world_input", -128, 42], "paste": true, "mirror_aim": [0.541, 0.259], "mirror_center": [0.525, 0.710]},
+    {"from": "search_filled", "control": "world_submit", "to": "search_results", "aim": [0.690, 0.265], "center": [456, 447], "radius": [14, 13], "mirror_aim": [0.684, 0.218], "mirror_center": [0.785, 0.683], "mirror_after_view": [-18, 0]},
+    {"from": "search_results", "control": "{card}", "to": "world_details", "aim": [0.368, 0.192], "center": [196, 410], "radius": [24, 21], "mirror_after_view": [3, -13]},
+    {"from": "world_details", "control": "world_new_instance", "to": "create_instance", "aim": [0.352, 0.307], "center": [182, 498], "radius": [19, 14], "mirror_aim": [0.499, 0.268], "mirror_center": [0.459, 0.729]},
+    {"from": "create_instance", "control": "world_invite_choice", "to": "instance_created", "aim": [0.486, 0.319], "center": [284, 475], "radius": [24, 8], "mirror_aim": [0.611, 0.247], "mirror_center": [0.651, 0.683]},
+    {"from": "instance_created", "control": "world_join", "to": "joined", "aim": [0.482, 0.305], "center": [286, 465], "radius": [32, 13], "hover": "world_join_tooltip", "mirror_aim": [0.625, 0.215], "mirror_center": [0.671, 0.661], "mirror_radius": [32, 22]}
+  ],
+  "anchors": {
+    "worlds_search": [[140, 198, 254, 404], 0.70],
+    "worlds_sidebar_title": [[0, 35, 640, 720], 0.82],
+    "worlds_sidebar_my_worlds": [[0, 35, 640, 720], 0.82],
+    "world_input": [[245, 350, 397, 502], 0.69],
+    "world_paste": [[168, 392, 242, 539], 0.72],
+    "world_clear_preload": [[0, 35, 640, 720], 0.86],
+    "world_details_actions": [[0, 35, 640, 720], 0.86],
+    "world_clipboard_pair": [[0, 35, 640, 720], 0.82],
+    "world_submit": [[408, 388, 501, 542], 0.72],
+    "world_butterfly_input": [[193, 391, 380, 549], 0.73],
+    "world_results": [[149, 265, 328, 434], 0.72],
+    "world_butterfly_card": [[145, 340, 501, 594], 0.82],
+    "world_butterfly_results_query": [[330, 270, 480, 400], 0.74],
+    "world_butterfly_details": [[163, 263, 346, 433], 0.75],
+    "world_new_instance": [[143, 429, 230, 588], 0.69],
+    "world_create": [[241, 265, 433, 429], 0.73],
+    "world_invite_choice": [[236, 426, 364, 544], 0.82],
+    "world_created": [[241, 317, 423, 481], 0.74],
+    "world_butterfly_private": [[259, 384, 405, 520], 0.77],
+    "world_join": [[239, 425, 334, 546], 0.73],
+    "world_join_tooltip": [[132, 545, 370, 714], 0.73],
+    "world_black_cat_input": [[0, 35, 640, 720], 0.80],
+    "world_black_cat_results_query": [[0, 35, 640, 720], 0.80],
+    "world_black_cat_card": [[0, 35, 640, 720], 0.84],
+    "world_black_cat_details": [[0, 35, 640, 720], 0.80],
+    "world_black_cat_private": [[0, 35, 640, 720], 0.82]
+  },
+  "hover_anchors": ["world_butterfly_card", "world_new_instance", "world_invite_choice", "world_join"],
+  "mirror_anchors": ["worlds_search", "worlds_sidebar_title", "worlds_sidebar_my_worlds", "world_input", "world_clipboard_pair", "world_submit", "world_results", "world_butterfly_input", "world_butterfly_card", "world_butterfly_results_query", "world_butterfly_details", "world_clear_preload", "world_details_actions", "world_new_instance", "world_create", "world_invite_choice", "world_created", "world_butterfly_private", "world_join", "world_join_tooltip", "world_black_cat_input", "world_black_cat_results_query", "world_black_cat_card", "world_black_cat_details", "world_black_cat_private"],
+  "mirror_tilt_anchors": ["worlds_search", "worlds_sidebar_title", "worlds_sidebar_my_worlds", "world_results", "world_butterfly_card", "world_black_cat_card", "world_black_cat_details"],
+  "mirror_hover_anchors": ["worlds_search", "world_butterfly_card", "world_new_instance", "world_invite_choice", "world_join"],
+  "mirror_extra_anchors": {
+    "worlds_search": ["worlds_search_mirror_hover_home"],
+    "world_clipboard_pair": ["world_clipboard_pair_mirror_hover", "world_clipboard_pair_mirror_hover_clear", "world_clipboard_pair_mirror_flat"],
+    "world_black_cat_details": ["world_black_cat_details_mirror_create_view"],
+    "world_black_cat_private": ["world_black_cat_private_mirror_tilt"],
+    "world_butterfly_card": ["world_butterfly_card_mirror_hover_tilt"],
+    "world_butterfly_details": ["world_butterfly_details_mirror_create_view"],
+    "world_new_instance": ["world_new_instance_mirror_hover_tilt", "world_new_instance_mirror_hover_wide"],
+    "world_clear_preload": ["world_clear_preload_mirror_wide"],
+    "world_join_tooltip": ["world_join_tooltip_mirror_tilt"]
+  },
+  "worlds": {
+    "Butterfly Home": {
+      "creator": "Mei ao",
+      "world_id": "wrld_24ffe911-327a-4f32-866d-06f8242aefe1",
+      "input": "world_butterfly_input",
+      "card": "world_butterfly_card",
+      "results_query": "world_butterfly_results_query",
+      "details": "world_butterfly_details",
+      "privacy": "world_butterfly_private"
+    },
+    "The Black Cat": {
+      "creator": "spookyghostboo",
+      "world_id": "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b",
+      "capture_source": "game_mirror",
+      "input": "world_black_cat_input",
+      "card": "world_black_cat_card",
+      "results_query": "world_black_cat_results_query",
+      "details": "world_black_cat_details",
+      "privacy": "world_black_cat_private"
+    }
+  }
+}

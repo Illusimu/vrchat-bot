@@ -1,0 +1,229 @@
+[
+  {
+    "id": "menu-01",
+    "domain": "Menus",
+    "objective": "Join a new invite-only instance of Butterfly Home.",
+    "setup": "Face the poster wall on Audio and clear any confirmation dialog.",
+    "success": "VRChat logs a new scene-ready Butterfly Home instance with Invite access.",
+    "world": "The Black Cat",
+    "area": "Posters in the spawn vestibule",
+    "destination": "Butterfly Home"
+  },
+  {
+    "id": "menu-02",
+    "domain": "Menus",
+    "objective": "Set the UI/Menu volume to about 55%.",
+    "setup": "Face the poster wall on Launch Pad with UI/Menu volume near 25%.",
+    "success": "A fresh Audio panel shows the UI/Menu slider between 50% and 60%.",
+    "world": "The Black Cat",
+    "area": "Posters in the spawn vestibule"
+  },
+  {
+    "id": "menu-03",
+    "domain": "Menus",
+    "objective": "Calibrate full-body tracking, then lift your left foot once to check it.",
+    "setup": "Use the benchmark avatar and trackers with full-body calibration cleared and frame both feet with the fixed camera.",
+    "success": "Capture the calibration screen, exit it after confirming, then show the avatar following a leg lift.",
+    "world": "The Black Cat",
+    "area": "Main-floor stage, facing the bar"
+  },
+  {
+    "id": "menu-04",
+    "domain": "Menus",
+    "objective": "Open the Worlds tab and find The Black Cat by spookyghostboo.",
+    "setup": "Open Audio and clear Worlds search.",
+    "success": "The matching world details and creator are visible. Stay in the current instance.",
+    "world": "Butterfly Home",
+    "area": "Arrival point, facing into the home"
+  },
+  {
+    "id": "menu-05",
+    "domain": "Menus",
+    "objective": "Open Audio from the closed Quick Menu, then close the menu.",
+    "setup": "Face the poster wall with Quick Menu closed.",
+    "success": "The Audio heading appears, then a fresh frame shows the cleared view.",
+    "world": "The Black Cat",
+    "area": "Posters in the spawn vestibule"
+  },
+  {
+    "id": "nav-01",
+    "domain": "Navigation",
+    "objective": "Stand on the wood floor next to the potted plant at the right end of the reception desk.",
+    "setup": "Stand centered on the vestibule side of the open doorway, facing the desk. Record the threshold from the headset and frame the floor beside the desk’s right-hand plant with a fixed external camera.",
+    "success": "An external view shows both feet stopped on the agreed desk-side floor area.",
+    "world": "The Black Cat",
+    "area": "Spawn-side edge of the vestibule doorway"
+  },
+  {
+    "id": "nav-02",
+    "domain": "Navigation",
+    "objective": "Walk to the first hallway couch and stop beside it.",
+    "setup": "Stand at the hallway desk on the side nearest the vestibule, facing along the hallway. Record the first couch seen from the doorway and the floor beside its near arm.",
+    "success": "The avatar stops beside the same couch shown in the setup frame.",
+    "world": "The Black Cat",
+    "area": "Hallway desk, facing the hallway couches"
+  },
+  {
+    "id": "nav-03",
+    "domain": "Navigation",
+    "objective": "Walk around the table directly ahead and stop on its far side.",
+    "setup": "Use the first freestanding light-wood table along the carpeted aisle from the stage. Stand on its stage side facing the center, with the brick wall on the left and the circular bar on the right. Record the route and the opposite floor from a camera fixed beside the aisle.",
+    "success": "An external view shows the avatar going around the table and stopping on its opposite side.",
+    "world": "The Black Cat",
+    "area": "Main-floor seating, on the stage side of a table"
+  },
+  {
+    "id": "nav-04",
+    "domain": "Navigation",
+    "objective": "Find the main-floor stage with the red curtain and microphone, and stand where it is clearly visible.",
+    "setup": "Use the vestibule poster-wall starting spot, with the stage out of view. Record a separate reference from the main room that shows the stage.",
+    "success": "A fresh headset frame centers the main-floor stage from inside the main room.",
+    "world": "The Black Cat",
+    "area": "Spawn vestibule, facing the poster wall"
+  },
+  {
+    "id": "nav-05",
+    "domain": "Navigation",
+    "objective": "Visit the hallway desk, the main bar, and the upstairs lounge, then return to spawn.",
+    "setup": "Start at the center of the spawn vestibule facing the poster wall. Record the exact tile against the wall and doorway, plus reference views of the hallway desk, main bar, and upstairs lounge.",
+    "success": "The trace shows the three landmarks and ends at the original spot in the vestibule.",
+    "world": "The Black Cat",
+    "area": "Center of the spawn vestibule"
+  },
+  {
+    "id": "motion-01",
+    "domain": "Motions",
+    "objective": "Wave once and return to a neutral stance.",
+    "setup": "Stand facing the bar with full-body tracking active. Put a fixed front camera off the stage.",
+    "success": "The fixed camera shows one wave and the hand returning to rest.",
+    "world": "The Black Cat",
+    "area": "Center of the main-floor stage"
+  },
+  {
+    "id": "motion-02",
+    "domain": "Motions",
+    "objective": "Nod once and return to neutral.",
+    "setup": "Reuse the wave start pose and fixed front camera.",
+    "success": "The fixed camera shows one distinct head dip and return.",
+    "world": "The Black Cat",
+    "area": "Center of the main-floor stage"
+  },
+  {
+    "id": "motion-03",
+    "domain": "Motions",
+    "objective": "Do one backflip, then stand still.",
+    "setup": "Confirm full-body calibration and clear the area. Set a fixed side camera.",
+    "success": "The feet pass above the head once, and the avatar finishes upright.",
+    "world": "The Black Cat",
+    "area": "Center of the main-floor stage"
+  },
+  {
+    "id": "motion-04",
+    "domain": "Motions",
+    "objective": "Do three push-ups, then stand still.",
+    "setup": "Reuse the backflip start pose, calibration, clear area, and fixed side camera.",
+    "success": "The side camera shows three distinct down-up cycles and a return to standing.",
+    "world": "The Black Cat",
+    "area": "Center of the main-floor stage"
+  },
+  {
+    "id": "motion-05",
+    "domain": "Motions",
+    "objective": "Sit on the near end of the hallway couch, pause, then stand.",
+    "setup": "Stand facing the near end of the couch. Frame it with a fixed side camera.",
+    "success": "The camera shows supported contact with the seat and a return to standing.",
+    "world": "The Black Cat",
+    "area": "First hallway couch from the spawn doorway"
+  },
+  {
+    "id": "object-01",
+    "domain": "Objects",
+    "objective": "Pick up the yellow mug and hold it still.",
+    "setup": "Use the yellow mug on the inner drink shelf beside the taps. Stand inside the bar facing the mug, with both hands empty. Record the mug, shelf edge, and taps in the starting frame.",
+    "success": "The yellow mug clears the shelf and follows the holding hand.",
+    "world": "The Black Cat",
+    "area": "Main-floor bar, inside the serving gap facing the drink shelf"
+  },
+  {
+    "id": "object-02",
+    "domain": "Objects",
+    "start_grip": "right",
+    "objective": "Put the yellow mug back beside the taps and release it.",
+    "setup": "Use the object-01 stand position and shelf spot beside the taps. Start with the yellow mug held in the right hand, the landing spot visible, and the left hand empty. Record the mug and its starting wrist pose.",
+    "success": "The yellow mug stays on the agreed shelf spot after the hand moves away.",
+    "world": "The Black Cat",
+    "area": "Same main-floor drink shelf as object-01"
+  },
+  {
+    "id": "object-03",
+    "domain": "Objects",
+    "objective": "Move the grape-juice bottle to the adjacent booth table farther from the bar.",
+    "setup": "Use two adjacent booths by the main bar, with one clearly farther from the bar. Put the red-label grape-juice bottle from the inner bar shelf on the nearer table. Start facing the bottle within reach with both hands empty and record both tabletop spots.",
+    "success": "The bottle stays on the destination table after the hand releases it and moves away.",
+    "world": "The Black Cat",
+    "area": "Two booth tables near the main-floor bar"
+  },
+  {
+    "id": "object-04",
+    "domain": "Objects",
+    "objective": "Use your left hand to move the drink onto the clear plank immediately to its left and leave it upright.",
+    "setup": "Stand at the bar’s end facing the hallway. Put the drink within left-hand reach, clear the adjacent plank to its left as seen from the starting view, and record both spots. Start with both hands empty.",
+    "success": "The left hand carries the drink and releases it upright on the adjacent clear plank to its left.",
+    "world": "The Black Cat",
+    "area": "Main-floor bar counter, at the bar’s end nearest the hallway"
+  },
+  {
+    "id": "object-05",
+    "domain": "Objects",
+    "objective": "Carry the yellow mug through the doorway and set it on the vestibule floor.",
+    "setup": "Place the yellow mug on its side on the wood floor beside the potted plant at the end of the hallway desk. Start kneeling within reach of the mug with both hands empty. Clear the route through the open glass doorway and record the landing spot on the vestibule floor next to the poster wall.",
+    "success": "The trace shows a continuous carry through the doorway and the yellow mug stays at the landing spot after release.",
+    "world": "The Black Cat",
+    "area": "Hallway desk, beside the potted plant"
+  },
+  {
+    "id": "media-01",
+    "domain": "Camera and media",
+    "objective": "Open the VRChat stream camera and show a front-facing view of the avatar.",
+    "setup": "Face the bar with the stream camera closed.",
+    "success": "The connected stream shows the front of the avatar.",
+    "world": "The Black Cat",
+    "area": "Center of the main-floor stage"
+  },
+  {
+    "id": "media-02",
+    "domain": "Camera and media",
+    "objective": "Place the camera for a fixed wide shot, then walk across the stage to the opposite floor monitor.",
+    "setup": "Connect the stream at its normal zoom, start beside one floor monitor facing the bar and record both stage endpoints.",
+    "success": "The background stays fixed while the avatar crosses the frame.",
+    "world": "The Black Cat",
+    "area": "Main-floor stage, at the edge nearest the bar"
+  },
+  {
+    "id": "media-03",
+    "domain": "Camera and media",
+    "objective": "Move the camera from the front of the stage to a side view and release it.",
+    "setup": "Start with the camera world-anchored off the front edge and record its starting position.",
+    "success": "The side profile remains framed after the hand moves away.",
+    "world": "The Black Cat",
+    "area": "Main-floor stage, beside the stairs-side edge"
+  },
+  {
+    "id": "media-04",
+    "domain": "Camera and media",
+    "objective": "Take a photo of your whole avatar with the home visible behind you.",
+    "setup": "Use a fixed camera position at the arrival area and match the avatar position and background from the setup frame.",
+    "success": "A new image file contains the full avatar and the agreed Butterfly Home background.",
+    "world": "Butterfly Home",
+    "area": "Arrival point, facing into the home"
+  },
+  {
+    "id": "media-05",
+    "domain": "Camera and media",
+    "objective": "Record a short clip of a wave from a fixed camera.",
+    "setup": "Set a fixed front camera with the upper body in frame and no recording active.",
+    "success": "A playable clip shows the full wave and return to neutral with stable framing.",
+    "world": "The Black Cat",
+    "area": "Center of the main-floor stage"
+  }
+]

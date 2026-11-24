@@ -7,20 +7,22 @@ import argparse
 import json
 from activity_view import ActivityColumn
 from concurrent.futures import ThreadPoolExecutor
-from vr_agent import decide, pilot_views, LIMITS
+from vr_agent import decide, observe, pilot_views, LIMITS
+from window_capture import close_capture_sessions
 from targets import TargetSolver
 from camera_dolly import CameraDolly
 from PIL import ImageTk
 from world_map import MappingWorker
 from map_view import MapView
 
-from body import Body, DEVICE_NAMES, GESTURE_LENGTH, PORT, pack_frame
+from body import Body, DEVICE_NAMES, PORT, pack_frame
 
 
 class Pilot:
-    def __init__(self, root, output):
+    def __init__(self, root, output, game_mirror=False):
         self.root = root
         self.output = output
+        self.game_mirror = game_mirror
         self.body = Body()
         self.keys = set()
         self.pressed_since_frame = set()
@@ -31,11 +33,14 @@ class Pilot:
         self.bridge = None
         self.remote_ticket = 0
         self.external = False
+        self.trial_lease = None
+        self.trial_deadline = 0.
         self.remote_outcome = ""
         self.scroll_until = 0.
         self.scroll_axis = 0.
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.camera = ThreadPoolExecutor(max_workers=2)
+        self.stream_worker = ThreadPoolExecutor(max_workers=1)
         self.stream_capture = self.stream_frame = None
         self.stream_time = 0
         self.action_view = None
@@ -43,8 +48,13 @@ class Pilot:
         self.stereo_frame = None
         self.frame = None
         self.frame_time = 0
+        self.frame_id = 0
+        self.frame_poses = None
+        self.frame_grips = ()
+        self.frame_source = None
         self.solver = TargetSolver()
         self.last_poses = None
+        self.last_grips = ()
         self.future = None
         self.history = []
         self.observe_after = 0
@@ -71,7 +81,8 @@ class Pilot:
         panes = tk.Frame(root)
         panes.pack(fill="both", expand=True, padx=8, pady=4)
         panels = []
-        for index, title in enumerate(("Headset · left and right eyes", "VRChat camera", "Body trackers", "World memory")):
+        view_name = "VRChat game mirror" if game_mirror else "Headset · left and right eyes"
+        for index, title in enumerate((view_name, "VRChat camera", "Body trackers", "World memory")):
             row, column = divmod(index, 2)
             panes.rowconfigure(row, weight=1, uniform="rows")
             panes.columnconfigure(column, weight=1, uniform="columns")
@@ -103,6 +114,7 @@ class Pilot:
         self.canvas.bind("<FocusOut>", self.leave_manual_controls)
         self.canvas.bind("<KeyPress>", self.press)
         self.canvas.bind("<KeyRelease>", self.release_key)
+        root.bind("<Escape>", self.pause)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.tick()
         self.refresh_view()
@@ -127,30 +139,32 @@ class Pilot:
             self.map_view.info.set("World memory paused")
         self.root.after(450,self.refresh_map)
 
-    def toggle_camera(self):
-        self.pause()
+    def toggle_camera(self, *, pause_controls=True):
+        if pause_controls:
+            self.pause()
         self.stream_frame = self.stream_capture = None
+        self.stereo_frame = self.frame = self.capture = None
+        self.frame_source = None
         if self.solver.dolly:
             self.solver.dolly.close()
+            self.stream_worker.submit(self.solver.dolly.close_receiver)
             self.solver.dolly = None
             self.stream_label.configure(image="", text="Camera off")
         if self.camera_enabled.get():
             try:
-                self.solver.dolly = CameraDolly()
+                self.solver.dolly = CameraDolly(spout=self.game_mirror)
             except (OSError, ValueError) as error:
                 self.camera_enabled.set(False)
                 self.status.set(str(error))
                 return
             self.stream_label.configure(image="", text="Connecting to VRChat camera…")
-            # Discard any headset fallback captured before the sources were split.
-            self.stereo_frame = self.frame = self.capture = None
 
     def refresh_stream(self):
         if not self.solver.dolly:
             return
         if self.stream_capture is None:
             self.stream_started = time.monotonic()
-            self.stream_capture = self.camera.submit(self.solver.dolly.observe)
+            self.stream_capture = self.stream_worker.submit(self.solver.dolly.observe)
         elif self.stream_capture.done():
             try:
                 self.stream_frame = self.stream_capture.result()
@@ -168,25 +182,38 @@ class Pilot:
         self.refresh_stream()
         if self.capture is None:
             self.capture_started = time.monotonic()
-            self.capture = self.camera.submit(pilot_views, require_eye=bool(self.solver.dolly),
-                                                   menu_detail=bool(self.solver.selection))
+            self.capture_poses = self.last_poses
+            self.capture_grips = self.last_grips
+            require_eye = self.solver.dolly is not None and not self.solver.dolly.spout
+            self.capture = self.camera.submit(self.capture_views, require_eye,
+                                              bool(self.solver.selection))
         elif self.capture.done():
             try:
-                self.stereo_frame, self.frame = self.capture.result()
+                self.stereo_frame, self.frame, self.frame_source = self.capture.result()
                 self.frame_time = self.capture_started
+                self.frame_id += 1
+                self.frame_poses = self.capture_poses
+                self.frame_grips = self.capture_grips
                 display = (self.stereo_frame or self.frame).copy()
                 display.thumbnail((max(1, self.eye.winfo_width()), max(1, self.eye.winfo_height())))
                 self.eye_image = ImageTk.PhotoImage(display)
-                self.eye.configure(image=self.eye_image, compound="top",
-                                   text="" if self.stereo_frame else "Stereo unavailable · single view")
+                label = "" if self.stereo_frame or self.frame_source == "game_mirror" else "Stereo unavailable · single view"
+                self.eye.configure(image=self.eye_image, compound="top", text=label)
             except Exception as error:
-                self.stereo_frame = self.frame = None
+                self.stereo_frame = self.frame = self.frame_source = None
                 self.eye.configure(image="", text=str(error), wraplength=250)
                 if self.objective:
                     self.pause()
                     self.status.set(f"Capture unavailable: {error}")
             self.capture = None
         self.root.after(100, self.refresh_view)
+
+    def capture_views(self, require_eye, menu_detail):
+        # With Spout on, the game window keeps its first-person view.
+        if self.game_mirror and not require_eye:
+            return None, observe(stream=True, menu_detail=menu_detail), "game_mirror"
+        pair, eye = pilot_views(require_eye, menu_detail)
+        return pair, eye, "headset"
 
     def arm(self, _event):
         self.pause()
@@ -209,11 +236,12 @@ class Pilot:
 
     def press(self, event):
         key = event.keysym.lower()
-        if self.objective or self.external or self.solver.hands or self.solver.grips:
-            self.pause()
-            self.active = True
         if key == "escape":
             self.pause()
+            return "break"
+        if self.trial_lease or self.objective or self.external or self.solver.hands or self.solver.grips:
+            self.pause()
+            self.active = True
         if not self.active:
             return
         if key not in self.keys and key in ("f", "n"):
@@ -229,6 +257,7 @@ class Pilot:
             self.pause()
 
     def pause(self, _event=None):
+        self.trial_lease = None
         self.scroll_until = 0.
         self.remote_ticket += 1
         self.external = False
@@ -243,8 +272,28 @@ class Pilot:
         self.body.release()
         self.status.set("Paused. Click the preview to take control.")
 
-    def remote(self, command, value):
+    def remote(self, command, value, lease=None):
         now = time.monotonic()
+        if command == "trial_begin":
+            if self.trial_lease or self.external or self.objective or self.keys or self.drag is not None:
+                raise ValueError("Desktop Body is busy. Stop or finish the current activity first.")
+            self.trial_lease = value
+            self.trial_deadline = now + 90
+            self.status.set("Benchmark running. Stop, Esc, or take the controls to cancel.")
+            return value
+        if lease is not None and self.trial_lease != lease:
+            raise ValueError("Trial stopped or controls reclaimed")
+        if lease is not None:
+            self.trial_deadline = now + 90
+        if self.trial_lease and lease is None and command not in (
+            "status", "observe", "headset_snapshot", "map_status", "stop",
+        ):
+            raise ValueError("A benchmark owns the controls. Stop it to take over.")
+        if command == "trial_end":
+            if not lease:
+                raise ValueError("A trial lease is required")
+            self.pause()
+            return "Trial released the controls"
         if command == "menu_scroll":
             if self.external or self.objective or self.keys or self.drag is not None:
                 raise ValueError("Pilot busy")
@@ -268,6 +317,13 @@ class Pilot:
             return self.remote("map_status",None)
         if command == "status":
             return f"{self.status.get()}  Objective: {self.objective or '(none)'}"
+        if command == "headset_snapshot":
+            image = self.remote("observe", value)
+            return image, dict(frame_id=self.frame_id, capture_started=self.frame_time,
+                               age_ms=round((now-self.frame_time)*1000), view=value,
+                               source=self.frame_source,
+                               closed_grips=self.frame_grips,
+                               commanded_poses=self.frame_poses[:3] if self.frame_poses is not None else None)
         if command == "observe":
             if value=="headset":
                 image,stamp=self.frame,self.frame_time
@@ -298,12 +354,37 @@ class Pilot:
             return self.remote_outcome
         elif self.objective or self.external or self.keys or self.drag is not None:
             raise ValueError("Controls are busy. Read status or stop the current action.")
+        elif command == "grip":
+            side, closed = value
+            self.solver.set_grip(side, closed)
+            return {"side": side, "grip_closed": closed, "object_contact": "unverified"}
         elif command == "camera":
             if value != self.camera_enabled.get():
                 self.camera_enabled.set(value)
-                self.toggle_camera()
-            if value != bool(self.solver.dolly):
+                self.toggle_camera(pause_controls=lease is None)
+            camera = self.solver.dolly
+            if value != bool(camera):
                 raise ValueError(self.status.get())
+            if camera:
+                mode, streaming = camera.mode()
+                if mode == 0 and not camera.stream_ready(mode, streaming):
+                    raise ValueError("Open Photo Camera in VRChat before reconnecting the stream")
+                if not camera.stream_ready(mode, streaming):
+                    camera.enable_stream()
+            return "Camera connected" if camera else "Camera disconnected"
+        elif command == "camera_zoom":
+            camera = self.solver.dolly
+            if camera is None:
+                raise ValueError("Connect the stream camera before adjusting its zoom")
+            if value is None:
+                return camera.zoom()
+            camera.send("/usercamera/Zoom", float(value))
+        elif command == "take_photo":
+            camera = self.solver.dolly
+            if camera is None or camera.mode()[0] not in (1, 2):
+                raise ValueError("Open the connected camera in Photo or Stream mode before taking a picture")
+            camera.send("/usercamera/Capture", True)
+            return "Photo requested"
             return "Camera connected" if value else "Camera disconnected"
         elif command == "objective":
             if not value.strip():
@@ -316,24 +397,26 @@ class Pilot:
             if self.frame_time < self.observe_after:
                 raise ValueError("Waiting for a new headset frame")
             if command=="body_action":
-                action, values, side, posture = value
-                limits = LIMITS.get(action, [])
+                action, values, side, posture, direction = value
+                limits = [(.1, 2.)] if action == "walk" else LIMITS.get(action, [])
                 if len(values)!=len(limits) or any(not lo<=x<=hi for x,(lo,hi) in zip(values,limits)):
                     raise ValueError("Action outside supported range")
-                target=dict(kind=action,values=values,side=side,gesture=posture)
+                target=dict(kind=action,values=values,side=side,gesture=posture,direction=direction)
             elif command=="confirm_fbt":
                 action="confirm_fbt"
                 target=dict(kind=action,values=[])
             elif command=="gesture":
                 action="gesture"
-                target=dict(kind=action,gesture=value,values=[])
+                name, repetitions = value
+                target=dict(kind=action, gesture=name, repetitions=repetitions, values=[])
             elif command == "select_by_name":
                 label,expected,tooltip=value
                 action="select_by_name"
                 target=dict(kind=action,values=[],label=label,expected=expected,tooltip=tooltip)
             elif command == "menu":
-                action,x,y = value
-                target = dict(kind="menu_"+action, values=[x,y] if action=="aim" else [])
+                action,x,y,hold_seconds = value
+                target = dict(kind="menu_"+action, values=[x,y] if action=="aim" else [],
+                              hold_seconds=hold_seconds)
             else:
                 action,values,side = value
                 limits = LIMITS[action]
@@ -355,22 +438,29 @@ class Pilot:
         self.map_executor.shutdown(wait=False)
         if self.solver.dolly:
             self.solver.dolly.close()
+            self.stream_worker.submit(self.solver.dolly.close_receiver)
             self.solver.dolly = None
         self.send(time.monotonic(), 0)
         self.solver.reader.shutdown(wait=False,cancel_futures=True)
         self.camera.shutdown(wait=False, cancel_futures=True)
+        self.stream_worker.shutdown(wait=False)
         self.executor.shutdown(wait=False, cancel_futures=True)
+        close_capture_sessions()
         self.root.destroy()
 
     def send(self, now, dt):
         self.advance_agent(now)
-        keys = self.keys | self.pressed_since_frame
-        keys.update(self.solver.keys | self.solver.grips)
-        frame = self.solver.overlay(self.body.update(keys, self.mouse, now, dt))
-        if now < self.scroll_until:
+        steady = self.bridge is not None and self.bridge.control_owner is not None
+        keys = self.solver.keys | self.solver.grips
+        if not steady:
+            keys.update(self.keys | self.pressed_since_frame)
+        mouse = (0, 0) if steady else self.mouse
+        frame = self.solver.overlay(self.body.update(keys, mouse, now, dt, steady=steady))
+        if not steady and now < self.scroll_until:
             poses, left, right = frame
             frame = poses, left, (0., self.scroll_axis, *right[2:])
         self.last_poses = frame[0]
+        self.last_grips = tuple(side for side, controls in zip(("left", "right"), frame[1:]) if controls[3])
         self.pressed_since_frame.clear()
         self.mouse[:] = 0, 0
         try:
@@ -421,7 +511,7 @@ class Pilot:
                     mid = (self.solver.playback.duration/2 + self.solver.playback.blend
                            if self.solver.playback else float("inf"))
                 else:
-                    mid = GESTURE_LENGTH[target["gesture"]]/2
+                    mid = self.solver.duration / 2
                 if self.action_view is None and self.stream_time >= self.solver.started + mid:
                     self.action_view = self.stream_frame
             if self.solver.target["kind"] == "camera" and (self.stream_frame is None or now-self.stream_time > 2):
@@ -508,6 +598,9 @@ class Pilot:
 
     def tick(self):
         now = time.monotonic()
+        if self.trial_lease and now >= self.trial_deadline:
+            self.pause()
+            self.status.set("Benchmark disconnected. Controls released.")
         if self.bridge:
             self.bridge.drain()
         self.draw(*self.send(now, now - self.last))
@@ -539,11 +632,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--camera", action="store_true", help="Connect the VRChat stream camera on startup")
     parser.add_argument("--mcp", action="store_true", help="Expose pilot tools at 127.0.0.1:29746/mcp")
+    parser.add_argument("--game-mirror", action="store_true", help="Use VRChat's live game mirror as a single view")
     parser.add_argument("--objective", help="Start a visual objective")
     args = parser.parse_args()
     root = tk.Tk()
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as output:
-        pilot = Pilot(root, output)
+        pilot = Pilot(root, output, game_mirror=args.game_mirror)
         if args.mcp:
             from pilot_mcp import PilotBridge
             pilot.bridge = PilotBridge(pilot)

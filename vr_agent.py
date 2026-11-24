@@ -5,26 +5,32 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
-import threading
 import urllib.request
 
 import win32gui
 import win32process
 import psutil
 from PIL import Image, ImageDraw, ImageStat
+from body import GESTURE_LENGTH
 from generated_motion import LIBRARY
 from world_context import world_context
+from window_capture import capture_window, close_capture_sessions
 
 
-def read_eye_texture():
+def read_eye_texture(stereo=False):
     build = Path(__file__).resolve().parent / "build"
     env = os.environ.copy()
     registry = build / "runtime-test/openvrpaths.vrpath"
     if registry.exists():
         env.setdefault("VR_PATHREG_OVERRIDE", str(registry))
-    data = subprocess.check_output([str(build / "package/tools/vr_eye.exe")],
-                                  env=env, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
+    command = [str(build / "package/tools/vr_eye.exe")]
+    if stereo:
+        command.append("--stereo")
+    try:
+        data = subprocess.check_output(command, env=env, timeout=8,
+                                       stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("SteamVR native eye capture unavailable.") from error
     header, pixels = data.split(b"\n", 1)
     w, h, fmt = header.decode().split()
     frame = Image.frombytes("RGBA", (int(w), int(h)), pixels, "raw", fmt).convert("RGB")
@@ -33,44 +39,39 @@ def read_eye_texture():
 
 def observe(stream=False, require_eye=False, menu_detail=False, stereo=False):
     hwnd = win32gui.FindWindow(None, "VRChat")
-    if not hwnd or win32gui.IsIconic(hwnd):
-        raise ValueError("Open the VRChat window and restore it from the taskbar.")
+    if not hwnd:
+        close_capture_sessions()
+        raise ValueError("Open the VRChat window.")
     _, pid = win32process.GetWindowThreadProcessId(hwnd)
     if psutil.Process(pid).name().lower() != "vrchat.exe":
         raise ValueError("The selected window does not belong to VRChat.")
     headset = win32gui.FindWindow(None, "Headset Window")
-    if stereo and not headset:
-        raise ValueError("Stereo mapping needs the virtual Headset Window")
-    if headset and not stream:
+    if (stream or not headset) and win32gui.IsIconic(hwnd):
+        raise ValueError("Restore the VRChat window from the taskbar for desktop capture.")
+    if stereo:
+        try:
+            pair = read_eye_texture(stereo=True)
+        except ValueError:
+            if not headset:
+                raise
+        else:
+            # Stereo geometry and its image references use this eye viewport size.
+            return pair.resize((1280, 720), Image.Resampling.BILINEAR)
+    headset_capture = bool(headset and not stream)
+    if headset_capture:
         _, owner = win32process.GetWindowThreadProcessId(headset)
         if psutil.Process(owner).name().lower() != "vrcompositor.exe":
             raise ValueError("Unexpected headset window owner.")
         hwnd = headset
-    vendor = str(Path(__file__).resolve().parent / "build/capture-lib")
-    if vendor not in sys.path:
-        sys.path.insert(0, vendor)
-    from windows_capture import WindowsCapture
-    ready = threading.Event()
-    images = []
-    capture = WindowsCapture(window_hwnd=hwnd, cursor_capture=False, draw_border=False)
-
-    @capture.event
-    def on_frame_arrived(frame, control):
-        images.append(Image.fromarray(frame.frame_buffer[:, :, 2::-1].copy()))
-        ready.set()
-        control.stop()
-
-    @capture.event
-    def on_closed():
-        ready.set()
-
-    control = capture.start_free_threaded()
-    ready.wait(3)
-    control.stop()
-    frame = images[0] if images else None
+        pid = owner
+    frame = capture_window("headset" if headset_capture else "game", hwnd, pid)
     if stereo:
         if frame is None or frame.size != (1280,720):
             raise ValueError("Waiting for the calibrated 1280 × 720 stereo surface")
+        left = frame.crop((0, 0, 640, 720))
+        right = frame.crop((640, 0, 1280, 720))
+        if any(max(ImageStat.Stat(eye).stddev) < 3 for eye in (left, right)):
+            raise ValueError("SteamVR did not provide two usable eye images")
         return frame
     if headset and not stream and frame is not None:
         frame = frame.crop((0, 0, frame.width // 2, frame.height))
@@ -93,8 +94,6 @@ def pilot_views(require_eye, menu_detail):
     except ValueError:
         return None, observe(require_eye=require_eye, menu_detail=menu_detail)
     left = pair.crop((0, 0, pair.width // 2, pair.height))
-    if max(ImageStat.Stat(left).stddev) < 3:
-        return None, observe(require_eye=True, menu_detail=menu_detail)
     if not menu_detail:
         left.thumbnail((896, 672))
     return pair, left
@@ -163,7 +162,7 @@ def decide(objective, history, image, stream=None, action_view=None, right=None,
         "wrist: values=[x,y,z,yaw,pitch,roll] in meters and degrees relative to current body heading. "
         "Standing floor origin, right +X, up +Y, forward -Z, shoulder height 1.4. Specify side and "
         "open/close/keep grip or click trigger on arrival. Estimate within reach only. Check actual object effect visually. "
-        "gesture: choose wave, nod, backflip, jumping-jacks or push-ups only when its preconditions hold. "
+        "gesture: choose wave, nod, backflip, jumping-jacks, push-ups or leg-lift only when its preconditions hold. "
         "motion: for other whole-body gestures use gesture as a short lowercase hyphenated clip name, "
         "values=[duration seconds 1..8]. Reuse catalog names with keyframes=[]. For a new clip supply "
         "keyframes rows [phase 0..1, SOMA joint index, local rotation vector x,y,z in degrees]. "
@@ -207,7 +206,7 @@ def decide(objective, history, image, stream=None, action_view=None, right=None,
         type(v) not in (float,int) or not lo <= v <= hi for v,(lo,hi) in zip(values,limits)
     ):
         raise ValueError("Invalid target coordinates")
-    if result["kind"] == "gesture" and result["gesture"] not in ("wave","nod","backflip","jumping-jacks","push-ups"):
+    if result["kind"] == "gesture" and result["gesture"] not in GESTURE_LENGTH:
         raise ValueError("Unknown built-in gesture")
     if result["kind"] == "camera" and stream is None:
         raise ValueError("A camera target needs a current camera frame")

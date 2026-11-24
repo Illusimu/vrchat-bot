@@ -9,7 +9,23 @@ from tracking_rig import NAMES as DEVICE_NAMES, procedural_trackers
 
 PORT = 29745
 FRAME = struct.Struct("<4s99f")
-GESTURE_LENGTH = {"wave": 1.6, "nod": 0.65, "backflip": 1.75, "jumping-jacks": 3.2, "push-ups": 5.6}
+GESTURE_LENGTH = {"wave": 1.6, "nod": 0.65, "backflip": 1.75, "jumping-jacks": 3.2, "push-ups": 5.6, "leg-lift": 2.4}
+SET_SIZE = {"jumping-jacks": 2, "push-ups": 3}
+
+
+def gesture_count(name, repetitions=None):
+    if name not in GESTURE_LENGTH:
+        raise ValueError(f"Unknown gesture {name!r}")
+    count = SET_SIZE.get(name, 1) if repetitions is None else repetitions
+    if type(count) is not int or not 1 <= count <= 5:
+        raise ValueError("Gesture repetitions must be a whole number from 1 through 5")
+    return count
+
+
+def gesture_duration(name, repetitions):
+    if name == "push-ups":
+        return GESTURE_LENGTH[name] * (.48 + .52 * repetitions / SET_SIZE[name])
+    return GESTURE_LENGTH[name] * repetitions / SET_SIZE.get(name, 1)
 
 
 def rotation(yaw, pitch=0, roll=0):
@@ -32,29 +48,34 @@ class Body:
         self.motion = Locomotion()
         self.rest = TaskPose()
 
-    def request_gesture(self, name, now):
+    def request_gesture(self, name, now, repetitions=None):
         """Request a finite animation. Call from the same loop as update."""
-        if name not in GESTURE_LENGTH:
-            raise ValueError(f"Unknown gesture {name!r}")
-        self.gestures[name] = now
+        count = gesture_count(name, repetitions)
+        duration = gesture_duration(name, count)
+        self.gestures[name] = (now, duration, count)
+        return duration
 
     def release(self):
         self.gestures.clear()
         self.crouch = 0.0
 
-    def update(self, keys, mouse, now, dt):
+    def update(self, keys, mouse, now, dt, *, steady=False):
         dt = min(dt, 0.05)
         strafe = int("d" in keys) - int("a" in keys)
         forward = int("w" in keys) - int("s" in keys)
         speed = math.hypot(strafe, forward)
         if speed > 1:
             strafe, forward = strafe / speed, forward / speed
-        if speed or "t" in keys:
+        if not steady and (speed or "t" in keys):
             self.rest.change("standing")
         if speed and not self.rest.settled:
             strafe = forward = 0.
-        movement = self.motion.update(strafe, forward, dt)
-        self.crouch += (("c" in keys) * 0.42 - self.crouch) * min(dt * 12, 1)
+        if steady:
+            strafe = forward = 0.
+            movement = STAND
+        else:
+            movement = self.motion.update(strafe, forward, dt)
+            self.crouch += (("c" in keys) * 0.42 - self.crouch) * min(dt * 12, 1)
 
         look_x = 110 * dt * (int("right" in keys) - int("left" in keys)) + mouse[0] * 0.22
         look_y = 85 * dt * (int("up" in keys) - int("down" in keys)) - mouse[1] * 0.22
@@ -70,16 +91,15 @@ class Body:
             movement = STAND
             self.gestures.clear()
             self.crouch = 0.0
-            self.yaw = self.pitch = 0.0
             # Keep the triggers available to confirm VRChat full-body calibration.
             left = (0.0, 0.0, left[2], *(0.0,) * 8)
             right = (0.0, 0.0, right[2], *(0.0,) * 8)
         if any(right):
             self.gestures.pop("wave", None)
 
-        nod = self.progress("nod", now)
-        wave = self.progress("wave", now)
-        head_pitch = self.pitch - 16 * math.sin(math.pi * nod)
+        nod = 0. if steady else self.progress("nod", now)
+        wave = 0. if steady else self.progress("wave", now)
+        head_pitch = 0.0 if calibrating else self.pitch - 16 * math.sin(math.pi * nod)
         wave_height = math.sin(math.pi * wave)
         wave_roll = wave_height * math.sin(6 * math.pi * wave) * 24
         bob = movement.rise
@@ -97,10 +117,12 @@ class Body:
             position = (cosine * x - sine * z, y, sine * x + cosine * z)
             return position + rotation(self.yaw, pitch, roll)
 
-        for name in ("backflip","jumping-jacks","push-ups"):
-            phase=self.progress(name,now)
-            if phase:
-                return procedural_trackers(tuple(pose(*p) for p in exercise(name,phase))),left,right
+        if not steady:
+            for name in ("backflip","jumping-jacks","push-ups","leg-lift"):
+                phase=self.progress(name,now)
+                if phase:
+                    count = self.gestures[name][2]
+                    return procedural_trackers(tuple(pose(*p) for p in exercise(name, phase, count))), left, right
         dx, dz = self.motion.direction
         swing_x = dx * movement.stride
         swing_z = -dz * movement.stride
@@ -112,15 +134,16 @@ class Body:
             (-.13+swing_x,.06+movement.left_lift,swing_z,0,0),
             (.13-swing_x,.06+movement.right_lift,-swing_z,0,0),
         )
-        offsets = self.rest.sample(dt)
+        offsets = self.rest.sample(0. if steady else dt)
         poses = tuple(pose(*(a+b for a,b in zip(endpoint, offset))) for endpoint,offset in zip(endpoints,offsets))
         return procedural_trackers(poses), left, right
 
     def progress(self, name, now):
         if name in self.gestures:
-            progress = (now - self.gestures[name]) / GESTURE_LENGTH[name]
+            started, duration, count = self.gestures[name]
+            progress = (now - started) / duration
             if 0 <= progress < 1:
-                return progress
+                return progress if name in SET_SIZE else (progress * count) % 1
             if progress >= 1:
                 del self.gestures[name]
         return 0.0

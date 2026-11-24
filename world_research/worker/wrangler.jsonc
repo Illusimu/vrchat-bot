@@ -1,0 +1,31 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vrchat-world-research",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "triggers": { "crons": [] },
+  "vars": {
+    "WORLD_RESEARCH_SCHEDULE": "disabled"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vrchat-world-research-runtime",
+      "database_id": "00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "binding": "WORLD_RESEARCH_BUFFER",
+      "database_name": "vrchat-world-research-buffer",
+      "database_id": "00000000-0000-0000-0000-000000000002"
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "WORLD_RESEARCH_SWEEPS",
+      "name": "vrchat-world-research-sweep",
+      "class_name": "WorldResearchSweep"
+    }
+  ]
+}

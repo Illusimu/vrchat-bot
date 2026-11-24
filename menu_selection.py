@@ -18,6 +18,22 @@ PRESETS = {
 }
 
 
+def calibration_guide_area(image):
+    """Measure the large bright blue regions used by VRChat's tracking guides."""
+    rgb = np.asarray(image.convert("RGB").resize((480, 374)))
+    hue, saturation, value = cv2.split(cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV))
+    blue = ((84 <= hue) & (hue <= 118) & (saturation > 168) & (value > 165)).astype(np.uint8)
+    _, _, stats, _ = cv2.connectedComponentsWithStats(blue)
+    # Ignore the pointer beam, icon fragments, and small matching parts of the avatar.
+    areas = [area for _, _, width, height, area in stats[1:] if width >= 16 and height >= 16 and area >= 300]
+    edge_blue = ((84 <= hue) & (hue <= 118) & (saturation > 65) & (value > 165)).astype(np.uint8)
+    _, _, edge_stats, _ = cv2.connectedComponentsWithStats(edge_blue)
+    cropped_guides = [area for _, top, width, height, area in edge_stats[1:]
+                      if top + height >= len(blue) - 1 and height >= 1.5 * width
+                      and area >= 750 and area >= .45 * width * height]
+    return float(max(sum(areas), max(cropped_guides, default=0)) / blue.size)
+
+
 def words(text):
     return " ".join(re.findall(r"\w+", text.casefold()))
 
@@ -50,18 +66,70 @@ def read_lines(image):
     return lines
 
 
-def laser_tip(image):
-    # The virtual right pointer enters from below/right in the left eye.
+def laser_tip(image, previous=None, target=None, *, minimum_value=95):
+    """Locate the upper end of a cyan beam, using an earlier pose when available."""
     rgb = np.asarray(image.convert("RGB").resize((600,672)))
-    mask = cv2.inRange(cv2.cvtColor(rgb,cv2.COLOR_RGB2HSV),(82,55,95),(106,225,255))
+    cyan = cv2.inRange(cv2.cvtColor(rgb,cv2.COLOR_RGB2HSV),(82,55,minimum_value),(106,255,255))
+    mask = cyan.copy() if previous is not None else cyan
+    if previous is not None:
+        old = np.asarray(previous.convert("RGB").resize((600,672)))
+        changed = cv2.absdiff(rgb,old).max(axis=2) > 24
+        mask[~changed] = 0
     lines = cv2.HoughLinesP(mask,1,np.pi/360,30,minLineLength=50,maxLineGap=9)
     candidates = []
-    for x,y,u,v in (() if lines is None else lines[:,0]):
+    rows, columns = np.nonzero(cyan)
+    for x,y,u,v in (() if lines is None else lines.reshape(-1, 4)):
         if v<y:
             x,y,u,v = u,v,x,y
-        if max(x,u)>410 and v>445 and v-y>24:
-            candidates.append((np.hypot(u-x,v-y),x/600,y/672))
+        if u>360 and v>380 and v-y>35 and u>x+15:
+            # Frame differencing and a changing background can split one visible beam.
+            # Follow its current color back along the detected line to recover the tip.
+            on_beam = np.abs(columns - (x + (rows - y) * (u - x) / (v - y))) <= 4
+            tip_y = y
+            for row in np.unique(rows[on_beam & (rows < y)])[::-1]:
+                if tip_y - row > 16:
+                    break
+                tip_y = row
+            tip_x = x if tip_y == y else float(np.median(columns[on_beam & (rows == tip_y)]))
+            tip = (tip_x/600,tip_y/672)
+            distance = np.linalg.norm(np.subtract(tip,target)) if target is not None else 0
+            candidates.append((np.hypot(u-x,v-y)/(1+3*distance),*tip))
     return max(candidates)[1:] if candidates else None
+
+
+# The game mirror crops the eye image. This seed still needs visual confirmation.
+GAME_MIRROR_AIM_OFFSET = (.09, .54)
+
+
+class PointerCalibration:
+    """Fit screen-space motion from small, observed changes in commanded aim."""
+
+    def __init__(self, target):
+        self.target = np.asarray(target, dtype=float)
+        self.initial = np.clip(self.target - [.02,.32],0,1)
+        self.samples = []
+        self.probes = iter(((0,0),(.08,0),(-.08,0),(0,-.065),(0,.065),
+                            (.11,-.035),(-.11,-.035),(0,.13)))
+
+    def probe(self):
+        offset = next(self.probes, None)
+        return None if offset is None else np.clip(self.initial + offset,0,1)
+
+    def correct(self, aim, tip):
+        self.samples.append((np.asarray(aim),np.asarray(tip)))
+        error = self.target-tip
+        if len(self.samples) >= 3:
+            commands, tips = map(np.asarray, zip(*self.samples[-6:]))
+            jacobian, _, rank, _ = np.linalg.lstsq(commands-commands.mean(axis=0),
+                                                   tips-tips.mean(axis=0),rcond=None)
+            if rank == 2 and np.linalg.cond(jacobian) < 12:
+                step = np.linalg.solve(jacobian.T,error)
+                return np.clip(aim+np.clip(step,-.12,.12),0,1)
+        if len(self.samples) == 1:
+            return np.clip(aim+[.025,0] if aim[0] < .96 else aim-[.025,0],0,1)
+        if len(self.samples) == 2:
+            return np.clip(aim+[0,.025] if aim[1] < .96 else aim-[0,.025],0,1)
+        return np.clip(aim+np.clip(error*.65,-.12,.12),0,1)
 
 
 @lru_cache(maxsize=5)
@@ -135,6 +203,7 @@ class Selection:
         self.pending = None
         self.clicked = False
         self.last_center = None
+        self.calibration = None
 
     def tick(self, solver, image, stamp, now):
         if now>self.deadline:
@@ -194,14 +263,15 @@ class Selection:
         self.matches=0
         if self.attempts>=9:
             return "No click: hover could not be confirmed"
-        if self.aim is None:
-            self.aim=np.clip(center-[.025,.38],0,1)
-        elif tip is not None:
-            self.aim=np.clip(self.aim+.65*(center-tip),0,1)
+        if self.calibration is None or np.linalg.norm(self.calibration.target-center) > .04:
+            self.calibration = PointerCalibration(center)
+            self.aim = self.calibration.probe()
+        elif self.aim is not None and tip is not None:
+            self.aim = self.calibration.correct(self.aim,tip)
         else:
-            # Probe around the initial estimate when the ray misses the panel.
-            offsets=((0,-.08),(0,.08),(-.07,0),(.07,0),(0,-.16),(0,.16))
-            self.aim=np.clip(center-[.025,.38]+offsets[(self.attempts-1)%len(offsets)],0,1)
+            self.aim = self.calibration.probe()
+        if self.aim is None:
+            return "No click: pointer unavailable near the control"
         solver.hands[2]=solver.pointer_pose(self.poses[0],*self.aim)
         self.attempts+=1
         self.after=now+.22

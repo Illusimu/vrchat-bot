@@ -2,11 +2,13 @@
 param([string]$Database)
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'hosted-origin.ps1')
+$baseUri = Get-WorldResearchBaseUri
 $workspace = Split-Path -Parent $PSScriptRoot
 $tokenPath = Join-Path $workspace '.world-research-token'
 $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim() | ConvertTo-SecureString
 $snapshot = Invoke-RestMethod `
-    -Uri 'https://escapethroughreality.com/api/world-research/active' `
+    -Uri "$baseUri/active" `
     -Method Post -Authentication Bearer -Token $token `
     -MaximumRedirection 0 -TimeoutSec 30
 

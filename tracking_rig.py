@@ -27,13 +27,17 @@ def limb_mount(start, end, half_length, pole, neutral_axis, fraction, torso):
     return (* (start + torso.apply(fraction * midpoint)), *orientation.as_quat(scalar_first=True))
 
 
+def shoulder_position(chest, torso, side):
+    return chest + torso.apply([.17 * side, .015, 0])
+
+
 def procedural_trackers(poses):
     points = np.asarray(poses)[:, :3]
     torso = Rotation.from_quat(poses[3][3:], scalar_first=True)
     chest = points[3] + .61 * (points[0] - points[3])
     extra = [(*chest, *poses[3][3:])]
     for side, hand in ((-1, 1), (1, 2)):
-        shoulder = chest + torso.apply([.17*side, .015, 0])
+        shoulder = shoulder_position(chest, torso, side)
         extra.append(limb_mount(shoulder, points[hand], .28, np.array([side*.5, -.4, .8]),
                                 [side, 0, 0], .82, torso))
     for side, foot in ((-1, 4), (1, 5)):

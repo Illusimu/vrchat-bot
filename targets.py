@@ -6,8 +6,8 @@ from menu_selection import Selection
 import cv2
 import numpy as np
 
-from body import GESTURE_LENGTH, rotation
-from tracking_rig import procedural_trackers
+from body import rotation
+from tracking_rig import procedural_trackers, shoulder_position
 from task_motion import HandAction
 from generated_motion import MotionJob, Playback
 from scipy.spatial.transform import Rotation
@@ -46,13 +46,24 @@ class TargetSolver:
         self.trigger = None
         self.menu_aimed = False
 
+    def set_grip(self, side, closed):
+        """Change the simulated controller input, independent of object contact."""
+        index, key = (1, "q") if side == "left" else (2, "e")
+        if closed:
+            self.grips.add(key)
+            self.carrying.add(index)
+        else:
+            self.grips.discard(key)
+            self.carrying.discard(index)
+        self.menu_aimed = False
+
     def start(self, target, image, body, poses, now):
         self.keys.clear()
         self.started = now
         self.last_image = -1
         kind = target["kind"]
         v = target["values"]
-        if kind not in ("menu_aim", "menu_click"):
+        if kind not in ("menu_aim", "menu_click", "menu_double_click"):
             self.menu_aimed = False
         if kind == "rest":
             body.rest.change(target["gesture"], v[0] if v else .45)
@@ -66,6 +77,10 @@ class TargetSolver:
         elif kind == "leap":
             if body.rest.name!="standing" or not body.rest.settled:
                 raise ValueError("Stand and settle before leaping")
+        elif kind == "walk":
+            walk_keys = {"forward": "w", "backward": "s", "left": "a", "right": "d"}
+            self.keys.add(walk_keys[target.get("direction", "forward")])
+            self.pulse_end = now + v[0]
         elif kind == "menu_aim":
             x, y = v
             if not (0 <= x <= 1 and 0 <= y <= 1):
@@ -79,15 +94,18 @@ class TargetSolver:
             self.selection = Selection(target["label"],target.get("expected",""),target.get("tooltip",""),poses,now)
             self.previous_hands = self.hands.copy()
             self.hands.clear()
-        elif kind == "menu_click":
+        elif kind in ("menu_click", "menu_double_click"):
             if not self.menu_aimed:
                 raise ValueError("Aim at a menu item and observe its hover before clicking")
             self.menu_aimed = False
             self.keys.add("x")
-            self.pulse_end = now + .12
+            self.pulse_end = now + target.get("hold_seconds", .12)
+            if kind == "menu_double_click":
+                self.second_click_after = None
+                self.second_click_started = False
         elif kind == "menu_toggle":
             self.keys.add("v")  # left Index B; mapped by the user's SteamVR bindings
-            self.pulse_end = now + .12
+            self.pulse_end = now + target.get("hold_seconds", .12)
         elif kind == "view":
             self.heading = (body.yaw + v[0], max(-80, min(80, body.pitch + v[1])))
         elif kind == "approach":
@@ -100,17 +118,21 @@ class TargetSolver:
             if min(self.patch.shape) < 6 or self.patch.std() < 5:
                 raise ValueError("Target has too little visible detail to track")
             self.center = ((x + width/2)*w, (y + height/2)*h)
+            self.previous_approach = None
+            self.approach_stalls = 0
         elif kind == "wrist":
             side = target["side"]
             self.hand_index = 1 if side == "left" else 2
             x, y, z, yaw, pitch, roll = v
-            shoulder = -.20 if side == "left" else .20
-            if math.dist((x,y,z), (shoulder,1.4-body.crouch,0)) > .85:
-                raise ValueError("Wrist target is beyond reach; approach or change stance")
             a = math.radians(body.yaw)
+            position = (math.cos(a)*x-math.sin(a)*z, y, math.sin(a)*x+math.cos(a)*z)
+            chest = np.asarray(poses[6][:3])
+            torso = Rotation.from_quat(poses[6][3:], scalar_first=True)
+            shoulder = shoulder_position(chest, torso, -1 if side == "left" else 1)
+            if math.dist(position, shoulder) > .85:
+                raise ValueError("Wrist target is beyond reach; approach or change stance")
             self.start_pose = poses[self.hand_index]
-            self.end_pose = (math.cos(a)*x-math.sin(a)*z, y, math.sin(a)*x+math.cos(a)*z,
-                             *rotation(body.yaw+yaw, pitch, roll))
+            self.end_pose = (*position, *rotation(body.yaw+yaw, pitch, roll))
             self.duration = max(.35, math.dist(self.start_pose[:3], self.end_pose[:3]) / .65,
                                 2*math.acos(min(1,abs(np.dot(self.start_pose[3:],self.end_pose[3:]))))/3)
         elif kind == "confirm_fbt":
@@ -119,7 +141,7 @@ class TargetSolver:
             self.keys.add("t")
         elif kind == "gesture":
             self.hands.clear()
-            body.request_gesture(target["gesture"], now)
+            self.duration = body.request_gesture(target["gesture"], now, target.get("repetitions"))
         elif kind == "motion":
             self.job = MotionJob(target["gesture"], v[0], target["keyframes"])
             self.initial = poses
@@ -150,7 +172,7 @@ class TargetSolver:
         x, y = max(0,int(cx)-105), max(0,int(cy)-100)
         area = gray[y:min(h,int(cy)+100), x:min(w,int(cx)+105)]
         best = None
-        for scale in (.85, 1., 1.18):
+        for scale in (.80, .85, 1., 1.18, 1.25):
             template = cv2.resize(self.patch, None, fx=scale, fy=scale)
             th, tw = template.shape
             if th > area.shape[0] or tw > area.shape[1]:
@@ -193,6 +215,8 @@ class TargetSolver:
             return outcome
         if image is None or now-stamp > 2:
             return "stale camera"
+        if kind == "walk":
+            return "Released the virtual thumbstick; verify displacement" if now >= self.pulse_end else None
         if kind == "rest":
             if body.rest.settled:
                 return body.rest.name+" tracker pose reached; inspect support in world"
@@ -268,6 +292,13 @@ class TargetSolver:
             if found is None:
                 return "visual target lost"
             center, size = found
+            if self.previous_approach is not None and np.linalg.norm(np.subtract(found, self.previous_approach)) < .006:
+                self.approach_stalls += 1
+                if self.approach_stalls >= 2:
+                    return "No visible progress toward the target; inspect the path"
+            else:
+                self.approach_stalls = 0
+            self.previous_approach = found
             desired_x, desired_height = self.target["values"][4:]
             if abs(center-desired_x) > .06:
                 self.keys = {"d" if center > desired_x else "a"}
@@ -277,7 +308,17 @@ class TargetSolver:
                 self.keys = {"s"}
             else:
                 return "visual position reached"
-            self.pulse_end = now+.22
+            self.pulse_end = now+.12
+        elif kind == "menu_double_click":
+            if now >= self.pulse_end:
+                if self.second_click_started:
+                    return "Two trigger pulses released; inspect the next headset frame"
+                if self.second_click_after is None:
+                    self.second_click_after = now + .07
+                elif now >= self.second_click_after:
+                    self.keys.add("x")
+                    self.pulse_end = now + self.target.get("hold_seconds", .12)
+                    self.second_click_started = True
         elif kind in ("menu_toggle","menu_click"):
             if now >= self.pulse_end:
                 return "button released; inspect the next headset frame"
@@ -305,7 +346,7 @@ class TargetSolver:
                         return
                     self.trigger = None
                 return "controller pose reached; grip " + grip
-        elif elapsed >= GESTURE_LENGTH[self.target["gesture"]]:
+        elif kind == "gesture" and elapsed >= self.duration:
             return "gesture stream finished"
 
     def overlay(self, frame):
