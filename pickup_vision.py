@@ -2,12 +2,33 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 import cv2
 import numpy as np
 from PIL import Image
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
+
+
+ImageCoordinate = Annotated[float, Field(ge=0, le=1)]
+
+
+class ColorTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    roi: tuple[ImageCoordinate, ImageCoordinate, ImageCoordinate, ImageCoordinate]
+    hue: int = Field(ge=0, le=179)
+    radius_px: int = Field(default=14, ge=6, le=32)
+    min_value: int = Field(default=0, ge=0, le=255)
+
+    @field_validator("roi")
+    @classmethod
+    def check_roi(cls, roi):
+        left, top, right, bottom = roi
+        if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
+            raise ValueError("Search rectangle must be inside the normalized image")
+        return roi
 
 
 def light_text(rgb):
@@ -183,13 +204,126 @@ def pickup_outline(before, after, box):
     return None
 
 
-def saturated_pixels(hsv):
-    return (hsv[:, :, 1] >= 150) & (hsv[:, :, 2] >= 65)
+def saturated_pixels(hsv, value_floor=65):
+    return (hsv[:, :, 1] >= 150) & (hsv[:, :, 2] >= value_floor)
 
 
-def hue_mask(hsv, hue):
+def hue_mask(hsv, hue, value_floor=65):
     distance = np.abs(hsv[:, :, 0].astype(np.int16) - hue)
-    return saturated_pixels(hsv) & (np.minimum(distance, 180 - distance) <= 4)
+    return saturated_pixels(hsv, value_floor) & (np.minimum(distance, 180 - distance) <= 4)
+
+
+class AmbiguousColorMatch(ValueError):
+    """More than one region is large enough to match the requested color."""
+
+
+def color_component(image, roi, hue, min_value=0, *, value_floor=65):
+    rgb = np.asarray(image.convert("RGB"))
+    height, width = rgb.shape[:2]
+    left, top, right, bottom = roi
+    x0, x1 = round(left * width), round(right * width)
+    y0, y1 = round(top * height), round(bottom * height)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        raise ValueError("Search rectangle is too small for the captured frame")
+    hsv = cv2.cvtColor(rgb[y0:y1, x0:x1], cv2.COLOR_RGB2HSV)
+    mask = hue_mask(hsv, hue, max(value_floor, min_value)).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    _, labels, stats, centers = cv2.connectedComponentsWithStats(mask)
+    ranked = sorted(range(1, len(stats)), key=lambda i: stats[i, cv2.CC_STAT_AREA], reverse=True)
+    ranked = [i for i in ranked if stats[i, cv2.CC_STAT_AREA] >= 45]
+    if not ranked:
+        raise ValueError("The requested color was not found inside the search rectangle")
+    index = ranked[0]
+    area = stats[index, cv2.CC_STAT_AREA]
+    if len(ranked) > 1 and stats[ranked[1], cv2.CC_STAT_AREA] >= area * .55:
+        raise AmbiguousColorMatch("Several regions match the requested color")
+    return labels == index, stats[index], centers[index], (x0, y0), (width, height)
+
+
+def color_center(image, roi, hue, min_value=0):
+    """Get the centroid of the unique matching color region."""
+    _, _, center, offset, size = color_component(image, roi, hue, min_value)
+    return [(float(value) + origin) / length for value, origin, length in zip(center, offset, size)]
+
+
+def colored_pickup_outline(before, after, target):
+    with Image.open(before) as image, Image.open(after) as highlighted:
+        component, (x, y, width, height, _), center, (ox, oy), (iw, ih) = color_component(
+            image, target.roi, target.hue, target.min_value,
+        )
+        if follows_color_contour(image, highlighted, component, (ox, oy), center, min(width, height)):
+            return {"cue": "Bright outline on color contour",
+                    "image_point": [(center[0] + ox) / iw, (center[1] + oy) / ih]}
+    box = ((x + ox) / iw, (y + oy) / ih, width / iw, height / ih)
+    if outline := pickup_outline(before, after, box):
+        return outline
+    return pale_pickup_outline(before, after, box)
+
+
+def follows_color_contour(before, after, component, offset, center, size):
+    if size < 12 or before.size != after.size:
+        return False
+    radius = max(2, round(.07 * size))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    ring = cv2.dilate(component.astype(np.uint8), kernel).astype(bool) & ~component
+    ox, oy = offset
+    height, width = component.shape
+    crop = (ox, oy, ox + width, oy + height)
+    old = np.asarray(before.crop(crop).convert("RGB"), dtype=np.int16)
+    now = np.asarray(after.crop(crop).convert("RGB"), dtype=np.int16)
+    red, green, blue = now.transpose(2, 0, 1)
+    bright_rim = (blue >= 180) & (green >= 160) & (blue >= red - 15)
+    saturated_rim = (blue >= 152) & (green >= 115) & (blue - red >= 45) & (green - red >= 25)
+    glow = ring & (bright_rim | saturated_rim)
+    glow &= (blue - old[..., 2] > 25) & (green - old[..., 1] > 9)
+    x_side = np.arange(width) >= center[0]
+    y_side = np.arange(height)[:, None] >= center[1]
+    quarters = (x_side & y_side, x_side & ~y_side, ~x_side & y_side, ~x_side & ~y_side)
+    return glow.sum() >= .10 * max(1, ring.sum()) and sum(
+        (glow & quarter).sum() >= max(10, .07 * (ring & quarter).sum()) for quarter in quarters
+    ) >= 3
+
+
+def pale_pickup_outline(before, after, box):
+    """Detect newly lit rim pixels around a color-matched prop on bright surfaces."""
+    left, top, width, height = box
+    x0, x1 = round(left * 862), round((left + width) * 862)
+    y0, y1 = round(top * 672), round((top + height) * 672)
+    if min(x1 - x0, y1 - y0) < 12:
+        return None
+    dx, dy = round((x1 - x0) * .31), round((y1 - y0) * .25)
+    x, y = max(0, x0 - dx), max(0, y0 - dy)
+    region = np.s_[y:min(672, y1 + dy), x:min(862, x1 + dx)]
+    prior = frame_rgb(before)[region].astype(np.int16)
+    red, green, blue = frame_rgb(after)[region].astype(np.int16).transpose(2, 0, 1)
+    glow = ((blue >= 190) & (green >= 160) & (blue >= red - 10)
+            & (blue - prior[..., 2] > 27) & (green - prior[..., 1] > 12))
+    glow[y0 - y + dy:y1 - y - dy, x0 - x + dx:x1 - x - dx] = False
+    # Require a rim spanning the prop. One bright laser streak should not qualify.
+    area = (x1 - x0) * (y1 - y0)
+    quadrants = [quadrant for rows in np.array_split(glow, 2, axis=0)
+                 for quadrant in np.array_split(rows, 2, axis=1)]
+    if glow.sum() >= .02 * area and sum(q.sum() >= max(5, .003 * area) for q in quadrants) >= 3:
+        return {"cue": "Pale pickup rim", "image_point": [left + width / 2, top + height / 2]}
+    return None
+
+
+def color_aim_point(image, roi, hue, validate=None, *, min_value=0, near_base=False, value_floor=65):
+    """Resolve one distinct colored region inside a normalized search rectangle."""
+    component, (x, y, w, h, _), _, (x0, y0), (width, height) = color_component(
+        image, roi, hue, min_value, value_floor=value_floor,
+    )
+    ys, xs = np.nonzero(component)
+    candidates = ((.5, .28), (.65, .22), (.35, .22), (.5, .45), (.7, .45), (.3, .45), (.5, .65),
+                  (.22, .05), (.5, .05), (.78, .05), (.92, .58), (.08, .58), (.22, .93), (.78, .93))
+    if near_base:
+        candidates = ((.5, .94), (.68, .94), (.32, .94), (.5, .87), (.66, .87), (.34, .87), (.5, .79))
+    for across, down in candidates:
+        nearest = np.argmin((xs - (x + w * across)) ** 2 + (ys - (y + h * down)) ** 2)
+        point = [(x0 + int(xs[nearest])) / width, (y0 + int(ys[nearest])) / height]
+        if validate is None or validate(point):
+            return point
+    raise ValueError("No stereo-supported point in the matching color region")
 
 
 def prop_color_reference(path, box, *, outline_frame=None):

@@ -9,6 +9,8 @@ import cv2
 import numpy as np
 
 from menu_selection import GAME_MIRROR_AIM_OFFSET, laser_tip
+from spatial_geometry import match_stereo_pixel, stereo_context
+from world_map import BASELINE, K
 
 
 @dataclass(frozen=True)
@@ -152,38 +154,84 @@ def fill_percent(image, located):
     return 100
 
 
-def stereo_menu_geometry(pair):
+def _panel_disparities(images, feature_pixels, target_pixels, baseline):
+    """Fit the disparity of the panel from direct left/right image matches."""
+    left, right = images
+    pixels = np.unique(np.rint(feature_pixels).astype(int), axis=0)
+    pixels = pixels[::max(1, len(pixels)//200)]
+    maximum = min(110, int(K[0, 0] * baseline / .16))
+    pairs = []
+    for x, y in pixels:
+        u = match_stereo_pixel(left, right, x, y, maximum)
+        if u is not None:
+            pairs.append((x, y, u))
+    if len(pairs) < 10:
+        return None
+    matches = np.asarray(pairs, dtype=np.float32)
+    xy = matches[:, :2].copy()
+    uv = xy.copy()
+    uv[:, 0] = matches[:, 2]
+    _, kept = cv2.estimateAffine2D(xy, uv, method=cv2.RANSAC, ransacReprojThreshold=1.2)
+    if kept is None:
+        return None
+    good = kept.ravel().astype(bool)
+    if good.sum() < max(10, .55*len(matches)) or min(np.ptp(xy[good], axis=0)) < 27:
+        return None
+    design = np.column_stack((xy[good], np.ones(good.sum())))
+    model = np.linalg.lstsq(design, xy[good, 0]-uv[good, 0], rcond=None)[0]
+    return np.column_stack((target_pixels, np.ones(len(target_pixels)))) @ model
+
+
+def stereo_menu_geometry(pair, world=False, slider_fraction=.5, control=None):
     """Estimate a visible menu plane and target in the virtual headset's axes."""
     if pair.size != (1280, 720):
         return {"status": "stereo_unavailable"}
     width, height = 640, 720
-    left = locate(pair.crop((0, 0, width, height)), (*LAUNCH, *AUDIO))
+    panels = (*LAUNCH, *AUDIO) if control is None else tuple(
+        panel for panel in (*LAUNCH, *CAMERA) if control in panel.controls
+    )
+    left = locate(pair.crop((0, 0, width, height)), panels)
     if left is None:
         return {"status": "panel_unrecognized_in_left_eye"}
-    right = locate(pair.crop((width, 0, 2 * width, height)), (left.panel,))
-    if right is None:
-        return {"status": "panel_unrecognized_in_right_eye", "panel": left.panel.name}
-
-    # The OpenVR driver uses symmetric ±1 tangents and a 64 mm IPD.
+    try:
+        images, _, pose, baseline = stereo_context(pair)
+    except ValueError:
+        images, pose, baseline = None, None, BASELINE
+    if world and pose is None:
+        return {"status": "menu_world_pose_unavailable", "panel": left.panel.name}
     keys, _ = reference(left.panel.image)
     samples = np.float32([key.pt for key in keys])
     center = samples.mean(axis=0) + left.panel.origin
     spread = np.ptp(samples, axis=0) * .18
     points = [center, center + [spread[0], 0], center + [0, spread[1]]]
-    if left.panel.track:
-        control_name = "ui_menu_slider_center"
-        points.append(np.mean(left.panel.track, axis=0))
+    if control is not None:
+        control_name = control
+        points.append(left.panel.controls[control])
+    elif left.panel.track:
+        control_name = "ui_menu_slider_center" if slider_fraction == .5 else "ui_menu_slider"
+        start, end = np.asarray(left.panel.track, dtype=float)
+        points.append(start + (end-start) * slider_fraction)
     else:
         control_name = "audio_tab"
         points.append(left.panel.controls["audio"])
-    a, b = left.project(points), right.project(points)
-    disparity = a[:, 0] - b[:, 0]
-    vertical_error = float(np.max(np.abs(a[:, 1] - b[:, 1])))
+    a = left.project(points)
+    disparity = _panel_disparities(images, left.project(samples + left.panel.origin), a, baseline) if images else None
+    if disparity is None:
+        right = locate(pair.crop((width, 0, 2 * width, height)), (left.panel,))
+        if right is None:
+            return {"status": "panel_unrecognized_in_right_eye", "panel": left.panel.name}
+        b = right.project(points)
+        disparity = a[:, 0] - b[:, 0]
+        vertical_error = float(np.max(np.abs(a[:, 1] - b[:, 1])))
+        middle = (a + b) / 2
+    else:
+        middle = a.copy()
+        middle[:, 0] -= disparity / 2
+        vertical_error = 0.
     if not np.isfinite(disparity).all() or np.any(disparity < 3) or vertical_error > 5:
         return {"status": "stereo_alignment_unverified", "panel": left.panel.name,
                 "vertical_error_px": round(vertical_error, 2)}
-    depth = (.064 * width / 2) / disparity
-    middle = (a + b) / 2
+    depth = (baseline * K[0, 0]) / disparity
     positions = np.column_stack(((2 * middle[:, 0] / width - 1) * depth,
                                  (1 - 2 * middle[:, 1] / height) * depth, -depth))
     normal = np.cross(positions[1] - positions[0], positions[2] - positions[0])
@@ -191,9 +239,23 @@ def stereo_menu_geometry(pair):
     if magnitude < .00005:
         return {"status": "panel_plane_unverified", "panel": left.panel.name}
     tilt = np.degrees(np.arccos(np.clip(abs(normal[2]) / magnitude, 0, 1)))
-    return {"status": "measured", "panel": left.panel.name, "control": control_name,
-            "target_head_xyz_m": positions[-1].astype(float).round(3).tolist(),
-            "panel_tilt_deg": round(float(tilt), 1), "vertical_error_px": round(vertical_error, 2)}
+    result = {"status": "measured", "panel": left.panel.name, "control": control_name,
+              "target_head_xyz_m": positions[-1].astype(float).round(3).tolist(),
+              "panel_tilt_deg": round(float(tilt), 1), "vertical_error_px": round(vertical_error, 2),
+              "eye_spacing_m": baseline, "eye_spacing_source": "rendered" if pose is not None else "configured"}
+    if pose is not None:
+        pixels = np.column_stack((a, np.ones(len(a))))
+        rays = pixels @ np.linalg.inv(K).T
+        projected = (rays * depth[:, None]) @ pose[:3, :3].T + pose[:3, 3]
+        plane = np.cross(projected[1] - projected[0], projected[2] - projected[0])
+        plane /= np.linalg.norm(plane)
+        result.update(panel_origin_world_xyz_m=projected[0].tolist(), panel_normal_world=plane.tolist(),
+                      target_world_xyz_m=projected[-1].tolist(),
+                      target_left_image_xy=(a[-1] / [width-1, height-1]).tolist())
+        hitbox = (left.panel.hitboxes or {}).get(control_name)
+        if hitbox is not None:
+            result["target_left_hitbox_px"] = left.project(hitbox).tolist()
+    return result
 
 
 def tab_highlight(image, x, y):

@@ -54,35 +54,11 @@ bool hasPicture(const D3D11_MAPPED_SUBRESOURCE& pixels, UINT width, UINT height)
     return false;
 }
 
-int capture(vr::IVRSystem* system, bool stereo) {
-    int32_t index = -1;
-    system->GetDXGIOutputInfo(&index);
-    ComPtr<IDXGIFactory1> factory;
-    ComPtr<IDXGIAdapter> adapter;
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
-        FAILED(factory->EnumAdapters(index, &adapter))) return 2;
-    ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11DeviceContext> context;
-    if (FAILED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
-        nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 3;
-    auto compositor = vr::VRCompositor();
-    if (!compositor) return 4;
-    EyeTexture eyes[2];
-    const unsigned eyeCount = stereo ? 2 : 1;
-    for (unsigned i = 0; i < eyeCount; ++i) {
-        if (auto result = eyes[i].open(compositor, device.Get(), i ? vr::Eye_Right : vr::Eye_Left))
-            return result;
-    }
+int readFrame(ID3D11DeviceContext* context, EyeTexture* eyes, unsigned eyeCount) {
     const auto& left = eyes[0];
     const UINT width = left.desc.Width, height = left.desc.Height;
-    if (stereo && (eyes[1].desc.Width != width || eyes[1].desc.Height != height
-        || eyes[1].bgra != left.bgra)) return 7;
-
-    // SteamVR can return a blank shared texture before it draws the first mirror frame.
-    // Keep both subscriptions alive and queue their copies together before either readback.
     const auto deadline = GetTickCount64() + 900;
     do {
-        Sleep(50);
         for (unsigned i = 0; i < eyeCount; ++i)
             context->CopyResource(eyes[i].staging.Get(), eyes[i].texture.Get());
         D3D11_MAPPED_SUBRESOURCE pixels[2]{};
@@ -107,25 +83,63 @@ int capture(vr::IVRSystem* system, bool stereo) {
             context->Unmap(eyes[i].staging.Get(), 0);
         if (mapped != eyeCount) return 9;
         if (ready) {
-            _setmode(_fileno(stdout), _O_BINARY);
             printf("%u %u %s\n", width * eyeCount, height, left.bgra ? "BGRA" : "RGBA");
-            return fwrite(frame.data(), 1, frame.size(), stdout) == frame.size() ? 0 : 11;
+            if (fwrite(frame.data(), 1, frame.size(), stdout) != frame.size()) return 11;
+            return fflush(stdout) == 0 ? 0 : 11;
         }
+        Sleep(50);
     } while (GetTickCount64() < deadline);
     fputs("SteamVR mirror textures did not produce a visible frame\n", stderr);
     return 10;
 }
 
+int capture(vr::IVRSystem* system, bool stereo, bool serve) {
+    int32_t index = -1;
+    system->GetDXGIOutputInfo(&index);
+    ComPtr<IDXGIFactory1> factory;
+    ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->EnumAdapters(index, &adapter))) return 2;
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    if (FAILED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+        nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context))) return 3;
+    auto compositor = vr::VRCompositor();
+    if (!compositor) return 4;
+    EyeTexture eyes[2];
+    const unsigned eyeCount = stereo ? 2 : 1;
+    for (unsigned i = 0; i < eyeCount; ++i) {
+        if (auto result = eyes[i].open(compositor, device.Get(), i ? vr::Eye_Right : vr::Eye_Left))
+            return result;
+    }
+    const auto& left = eyes[0];
+    const UINT width = left.desc.Width, height = left.desc.Height;
+    if (stereo && (eyes[1].desc.Width != width || eyes[1].desc.Height != height
+        || eyes[1].bgra != left.bgra)) return 7;
+
+    _setmode(_fileno(stdout), _O_BINARY);
+    if (!serve) return readFrame(context.Get(), eyes, eyeCount);
+
+    // Fetch on request while keeping both mirrors subscribed across captures.
+    char request[8];
+    while (fgets(request, sizeof(request), stdin)) {
+        if (std::strcmp(request, "next\n")) return 1;
+        if (auto result = readFrame(context.Get(), eyes, eyeCount)) return result;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
-    const bool stereo = argc == 2 && !std::strcmp(argv[1], "--stereo");
-    if (argc != 1 && !stereo) {
-        fputs("Usage: vr_eye [--stereo]\n", stderr);
+    const bool stereo = argc >= 2 && !std::strcmp(argv[1], "--stereo");
+    const bool serve = argc == 3 && stereo && !std::strcmp(argv[2], "--serve");
+    if (argc != 1 && !(argc == 2 && stereo) && !serve) {
+        fputs("Usage: vr_eye [--stereo [--serve]]\n", stderr);
         return 1;
     }
     vr::EVRInitError error;
     auto system = vr::VR_Init(&error, vr::VRApplication_Background);
     if (error) { fprintf(stderr, "%s", vr::VR_GetVRInitErrorAsEnglishDescription(error)); return 1; }
-    auto result = capture(system, stereo);
+    auto result = capture(system, stereo, serve);
     vr::VR_Shutdown();
     return result;
 }

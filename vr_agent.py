@@ -1,10 +1,13 @@
 """One visual decision at a time, using the local llama.cpp server."""
 import base64
+import atexit
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import os
 from pathlib import Path
 import subprocess
+from threading import Lock
 import urllib.request
 
 import win32gui
@@ -17,30 +20,87 @@ from world_context import world_context
 from window_capture import capture_window, close_capture_sessions
 
 
-def read_eye_texture(stereo=False):
+def native_eye_command(*arguments):
     build = Path(__file__).resolve().parent / "build"
     env = os.environ.copy()
     registry = build / "runtime-test/openvrpaths.vrpath"
     if registry.exists():
         env.setdefault("VR_PATHREG_OVERRIDE", str(registry))
-    command = [str(build / "package/tools/vr_eye.exe")]
-    if stereo:
-        command.append("--stereo")
+    return [str(build / "package/tools/vr_eye.exe"), *arguments], env
+
+
+def decode_eye_texture(header, pixels):
+    w, h, fmt = header.decode().split()
+    return Image.frombytes("RGBA", (int(w), int(h)), pixels, "raw", fmt).convert("RGB")
+
+
+def read_eye_texture(stereo=False):
+    command, env = native_eye_command(*(["--stereo"] if stereo else []))
     try:
         data = subprocess.check_output(command, env=env, timeout=8,
                                        stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError("SteamVR native eye capture unavailable.") from error
     header, pixels = data.split(b"\n", 1)
-    w, h, fmt = header.decode().split()
-    frame = Image.frombytes("RGBA", (int(w), int(h)), pixels, "raw", fmt).convert("RGB")
-    return frame
+    return decode_eye_texture(header, pixels)
+
+
+class StereoCapture:
+    def __init__(self):
+        self.lock = Lock()
+        self.process = None
+        self.reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="steamvr-stereo")
+
+    @staticmethod
+    def read(process):
+        process.stdin.write(b"next\n")
+        process.stdin.flush()
+        header = process.stdout.readline(64)
+        width, height, fmt = header.split()
+        size = int(width) * int(height) * 4
+        if not 0 < size <= 128*1024*1024 or fmt not in (b"RGBA", b"BGRA"):
+            raise ValueError("Invalid SteamVR eye frame header")
+        pixels = process.stdout.read(size)
+        if len(pixels) != size:
+            raise ValueError("Incomplete SteamVR eye frame")
+        return decode_eye_texture(header, pixels)
+
+    def stop(self):
+        if self.process is not None:
+            self.process.kill()
+            self.process.wait()
+            self.process.stdin.close()
+            self.process.stdout.close()
+            self.process = None
+
+    def capture(self):
+        with self.lock:
+            try:
+                if self.process is None:
+                    command, env = native_eye_command("--stereo", "--serve")
+                    self.process = subprocess.Popen(command, env=env, stdin=subprocess.PIPE,
+                                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                                    creationflags=subprocess.CREATE_NO_WINDOW)
+                request = self.reader.submit(self.read, self.process)
+                return request.result(timeout=3)
+            except (OSError, ValueError, TimeoutError) as error:
+                self.stop()
+                raise ValueError("SteamVR stereo capture unavailable.") from error
+
+    def close(self):
+        with self.lock:
+            self.stop()
+
+
+_stereo_capture = StereoCapture()
+atexit.register(_stereo_capture.close)
 
 
 def observe(stream=False, require_eye=False, menu_detail=False, stereo=False):
     hwnd = win32gui.FindWindow(None, "VRChat")
     if not hwnd:
         close_capture_sessions()
+        _stereo_capture.close()
         raise ValueError("Open the VRChat window.")
     _, pid = win32process.GetWindowThreadProcessId(hwnd)
     if psutil.Process(pid).name().lower() != "vrchat.exe":
@@ -50,7 +110,7 @@ def observe(stream=False, require_eye=False, menu_detail=False, stereo=False):
         raise ValueError("Restore the VRChat window from the taskbar for desktop capture.")
     if stereo:
         try:
-            pair = read_eye_texture(stereo=True)
+            pair = _stereo_capture.capture()
         except ValueError:
             if not headset:
                 raise

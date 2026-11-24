@@ -5,6 +5,7 @@ import time
 import tkinter as tk
 import argparse
 import json
+from pathlib import Path
 from activity_view import ActivityColumn
 from concurrent.futures import ThreadPoolExecutor
 from vr_agent import decide, observe, pilot_views, LIMITS
@@ -358,6 +359,12 @@ class Pilot:
             side, closed = value
             self.solver.set_grip(side, closed)
             return {"side": side, "grip_closed": closed, "object_contact": "unverified"}
+        elif command == "grip_pair":
+            left, right = value
+            self.solver.set_grip("left", left)
+            self.solver.set_grip("right", right)
+            return {"closed_grips": [side for side, closed in zip(("left", "right"), value) if closed],
+                    "object_contact": "unverified"}
         elif command == "camera":
             if value != self.camera_enabled.get():
                 self.camera_enabled.set(value)
@@ -392,11 +399,28 @@ class Pilot:
             self.prompt.delete(0,"end")
             self.prompt.insert(0,value)
             self.start_agent()
-        elif command in ("menu","target","select_by_name","gesture","confirm_fbt","body_action"):
+        elif command in ("menu","target","wrist_pair","pointer_pair","route","select_by_name","gesture","confirm_fbt","body_action"):
             self.remote("observe","headset")
             if self.frame_time < self.observe_after:
                 raise ValueError("Waiting for a new headset frame")
-            if command=="body_action":
+            if command == "route":
+                action = "route"
+                target = dict(kind=action, values=value)
+            elif command in ("wrist_pair", "pointer_pair"):
+                speed = .65
+                if command == "wrist_pair" and isinstance(value, dict):
+                    speed = value["speed_m_s"]
+                    value = value["poses"]
+                    if not .65 <= speed <= 1.35 or (speed > .65 and self.solver.grips):
+                        raise ValueError("Fast wrist retraction requires two open grips")
+                limits = LIMITS["wrist" if command == "wrist_pair" else "menu_aim"]
+                if len(value) != 2 or any(len(wrist) != len(limits) or
+                                         any(not lo <= v <= hi for v, (lo, hi) in zip(wrist, limits))
+                                         for wrist in value):
+                    raise ValueError("Paired controls outside supported coordinates")
+                action = command
+                target = dict(kind=action, values=value, speed_m_s=speed)
+            elif command=="body_action":
                 action, values, side, posture, direction = value
                 limits = [(.1, 2.)] if action == "walk" else LIMITS.get(action, [])
                 if len(values)!=len(limits) or any(not lo<=x<=hi for x,(lo,hi) in zip(values,limits)):
@@ -414,9 +438,9 @@ class Pilot:
                 action="select_by_name"
                 target=dict(kind=action,values=[],label=label,expected=expected,tooltip=tooltip)
             elif command == "menu":
-                action,x,y,hold_seconds = value
+                action,x,y,hold_seconds,side = value
                 target = dict(kind="menu_"+action, values=[x,y] if action=="aim" else [],
-                              hold_seconds=hold_seconds)
+                              hold_seconds=hold_seconds, side=side)
             else:
                 action,values,side = value
                 limits = LIMITS[action]
@@ -632,15 +656,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--camera", action="store_true", help="Connect the VRChat stream camera on startup")
     parser.add_argument("--mcp", action="store_true", help="Expose pilot tools at 127.0.0.1:29746/mcp")
+    parser.add_argument("--beam-calibration", type=Path, help="Load a saved MCP beam calibration")
     parser.add_argument("--game-mirror", action="store_true", help="Use VRChat's live game mirror as a single view")
     parser.add_argument("--objective", help="Start a visual objective")
     args = parser.parse_args()
+    saved_beam = None
+    if args.beam_calibration:
+        if not args.mcp:
+            parser.error("--beam-calibration requires --mcp")
+        from beam_geometry import validate_beam_calibration
+        try:
+            saved_beam = json.loads(args.beam_calibration.read_text(encoding="utf-8-sig"))
+            if isinstance(saved_beam, dict):
+                saved_beam = saved_beam.get("calibration", saved_beam)
+            saved_beam = validate_beam_calibration(saved_beam)
+        except (OSError, TypeError, ValueError) as error:
+            parser.error(str(error))
     root = tk.Tk()
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as output:
         pilot = Pilot(root, output, game_mirror=args.game_mirror)
         if args.mcp:
             from pilot_mcp import PilotBridge
             pilot.bridge = PilotBridge(pilot)
+            pilot.bridge.menu_beam = saved_beam
             pilot.bridge.start()
         if args.camera:
             pilot.camera_enabled.set(True)

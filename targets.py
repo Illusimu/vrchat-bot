@@ -22,6 +22,8 @@ def quaternion_mix(start, end, t):
 
 
 class TargetSolver:
+    walk_keys = {"forward": "w", "backward": "s", "left": "a", "right": "d"}
+
     def __init__(self):
         self.job = self.dolly = self.selection = None
         self.reader = ThreadPoolExecutor(max_workers=1)
@@ -57,6 +59,46 @@ class TargetSolver:
             self.carrying.discard(index)
         self.menu_aimed = False
 
+    @staticmethod
+    def wrist_motion(values, index, poses, heading, speed_m_s=.65):
+        x, y, z, yaw, pitch, roll = values
+        a = math.radians(heading)
+        position = (math.cos(a)*x-math.sin(a)*z, y, math.sin(a)*x+math.cos(a)*z)
+        chest = np.asarray(poses[6][:3])
+        torso = Rotation.from_quat(poses[6][3:], scalar_first=True)
+        shoulder = shoulder_position(chest, torso, -1 if index == 1 else 1)
+        if math.dist(position, shoulder) > .85:
+            raise ValueError("Wrist target is beyond reach; approach or change stance")
+        start = poses[index]
+        end = (*position, *rotation(heading+yaw, pitch, roll))
+        duration = max(.35, math.dist(start[:3], end[:3]) / speed_m_s,
+                       2*math.acos(min(1, abs(np.dot(start[3:], end[3:]))))/3)
+        return start, end, duration
+
+    def move_wrist(self, index, start, end, duration, elapsed):
+        t = min(1, elapsed / duration)
+        f = t*t*(3-2*t)
+        xyz = tuple(a+(b-a)*f for a,b in zip(start[:3], end[:3]))
+        self.hands[index] = (*xyz, *quaternion_mix(start[3:], end[3:], f))
+        return t == 1
+
+    def begin_route_step(self, body, now):
+        self.keys.clear()
+        step = self.route_steps[self.route_index]
+        if step["kind"] == "turn":
+            self.heading = (body.yaw + step["yaw"], max(-80, min(80, body.pitch + step["pitch"])))
+        else:
+            self.keys.add(self.walk_keys[step["direction"]])
+            self.pulse_end = now + step["duration"]
+
+    def turn_step(self, body, dt, speed_deg_s=100):
+        yaw = (self.heading[0] - body.yaw + 180) % 360 - 180
+        pitch = self.heading[1] - body.pitch
+        step = min(.05, dt) * speed_deg_s
+        body.yaw += max(-step, min(step, yaw))
+        body.pitch += max(-step, min(step, pitch))
+        return max(abs(yaw), abs(pitch)) < .5
+
     def start(self, target, image, body, poses, now):
         self.keys.clear()
         self.started = now
@@ -78,18 +120,25 @@ class TargetSolver:
             if body.rest.name!="standing" or not body.rest.settled:
                 raise ValueError("Stand and settle before leaping")
         elif kind == "walk":
-            walk_keys = {"forward": "w", "backward": "s", "left": "a", "right": "d"}
-            self.keys.add(walk_keys[target.get("direction", "forward")])
+            self.keys.add(self.walk_keys[target.get("direction", "forward")])
             self.pulse_end = now + v[0]
+        elif kind == "route":
+            self.route_steps = v
+            self.route_index = 0
+            self.begin_route_step(body, now)
         elif kind == "menu_aim":
             x, y = v
             if not (0 <= x <= 1 and 0 <= y <= 1):
                 raise ValueError("Menu coordinates must be between zero and one")
-            self.hand_index = 2
-            self.start_pose = poses[2]
-            self.end_pose = self.pointer_pose(poses[0],x,y)
+            side = target.get("side", "right")
+            self.hand_index = 1 if side == "left" else 2
+            self.start_pose = poses[self.hand_index]
+            self.end_pose = self.pointer_pose(poses[0], x, y, side)
             self.duration = .28
             self.menu_aimed = False
+        elif kind == "pointer_pair":
+            self.wrist_pair = [(poses[index], self.pointer_pose(poses[0], *xy, side), .28)
+                               for index, (side, xy) in enumerate(zip(("left", "right"), v), 1)]
         elif kind == "select_by_name":
             self.selection = Selection(target["label"],target.get("expected",""),target.get("tooltip",""),poses,now)
             self.previous_hands = self.hands.copy()
@@ -123,18 +172,10 @@ class TargetSolver:
         elif kind == "wrist":
             side = target["side"]
             self.hand_index = 1 if side == "left" else 2
-            x, y, z, yaw, pitch, roll = v
-            a = math.radians(body.yaw)
-            position = (math.cos(a)*x-math.sin(a)*z, y, math.sin(a)*x+math.cos(a)*z)
-            chest = np.asarray(poses[6][:3])
-            torso = Rotation.from_quat(poses[6][3:], scalar_first=True)
-            shoulder = shoulder_position(chest, torso, -1 if side == "left" else 1)
-            if math.dist(position, shoulder) > .85:
-                raise ValueError("Wrist target is beyond reach; approach or change stance")
-            self.start_pose = poses[self.hand_index]
-            self.end_pose = (*position, *rotation(body.yaw+yaw, pitch, roll))
-            self.duration = max(.35, math.dist(self.start_pose[:3], self.end_pose[:3]) / .65,
-                                2*math.acos(min(1,abs(np.dot(self.start_pose[3:],self.end_pose[3:]))))/3)
+            self.start_pose, self.end_pose, self.duration = self.wrist_motion(v, self.hand_index, poses, body.yaw)
+        elif kind == "wrist_pair":
+            self.wrist_pair = [self.wrist_motion(values, index, poses, body.yaw, target.get("speed_m_s", .65))
+                               for index, values in enumerate(v, 1)]
         elif kind == "confirm_fbt":
             self.hands.clear()
             self.grips.clear()
@@ -152,11 +193,12 @@ class TargetSolver:
         self.target = target
 
     @staticmethod
-    def pointer_pose(head, x, y):
+    def pointer_pose(head, x, y, side="right"):
         head = np.asarray(head)
         orient = Rotation.from_quat(head[[4,5,6,3]])
-        point = head[:3] + orient.apply([-.032+.7*(2*x-1), .7*(1-2*y), -.7])
-        origin = head[:3] + orient.apply([.07,-.07,-.12])
+        mirror = -1 if side == "left" else 1
+        point = head[:3] + orient.apply([-.032*mirror+.7*(2*x-1), .7*(1-2*y), -.7])
+        origin = head[:3] + orient.apply([.07*mirror,-.07,-.12])
         dx,dy,dz = point-origin
         return (*origin,*rotation(math.degrees(math.atan2(dx,-dz)),
                                   math.degrees(math.atan2(dy,math.hypot(dx,dz)))))
@@ -217,6 +259,18 @@ class TargetSolver:
             return "stale camera"
         if kind == "walk":
             return "Released the virtual thumbstick; verify displacement" if now >= self.pulse_end else None
+        if kind == "route":
+            step = self.route_steps[self.route_index]
+            complete = (self.turn_step(body, dt, step.get("speed_deg_s", 100))
+                        if step["kind"] == "turn" else now >= self.pulse_end)
+            if complete:
+                self.route_index += 1
+                if self.route_index == len(self.route_steps):
+                    return "Movement sequence executed; verify arrival in a fresh frame"
+                self.begin_route_step(body, now)
+            if elapsed >= 10:
+                return "Movement sequence timed out; arrival unconfirmed"
+            return
         if kind == "rest":
             if body.rest.settled:
                 return body.rest.name+" tracker pose reached; inspect support in world"
@@ -277,12 +331,7 @@ class TargetSolver:
         if elapsed > 9:
             return "timeout; position unconfirmed"
         if kind == "view":
-            yaw = (self.heading[0]-body.yaw+180)%360-180
-            pitch = self.heading[1]-body.pitch
-            step = min(.05,dt)*100
-            body.yaw += max(-step,min(step,yaw))
-            body.pitch += max(-step,min(step,pitch))
-            if max(abs(yaw),abs(pitch)) < .5:
+            if self.turn_step(body, dt):
                 return "head orientation reached"
         elif kind == "approach":
             if stamp <= self.last_image or stamp < self.pulse_end:
@@ -322,14 +371,15 @@ class TargetSolver:
         elif kind in ("menu_toggle","menu_click"):
             if now >= self.pulse_end:
                 return "button released; inspect the next headset frame"
+        elif kind in ("wrist_pair", "pointer_pair"):
+            finished = [self.move_wrist(index, *motion, elapsed)
+                        for index, motion in enumerate(self.wrist_pair, 1)]
+            if all(finished):
+                return "both controller poses reached; grips unchanged"
         elif kind in ("wrist","menu_aim"):
-            t = min(1,elapsed/self.duration)
-            f = t*t*(3-2*t)
-            xyz = tuple(a+(b-a)*f for a,b in zip(self.start_pose[:3],self.end_pose[:3]))
-            self.hands[self.hand_index] = (*xyz,*quaternion_mix(self.start_pose[3:],self.end_pose[3:],f))
-            if t == 1:
+            if self.move_wrist(self.hand_index, self.start_pose, self.end_pose, self.duration, elapsed):
                 if kind == "menu_aim":
-                    self.menu_aimed = True
+                    self.menu_aimed = self.hand_index == 2
                     return "pointer positioned; inspect hover before clicking"
                 grip = self.target["grip"]
                 key = "q" if self.hand_index == 1 else "e"

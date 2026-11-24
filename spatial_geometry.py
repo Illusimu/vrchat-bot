@@ -66,11 +66,28 @@ def _peaks(reference, other, x, y, side, maximum):
     return start + index + shift
 
 
+def match_stereo_pixel(left, right, x, y, maximum):
+    """Find a unique, reciprocal horizontal match for one left-eye pixel."""
+    if not 5 <= y < left.shape[0]-5:
+        return None
+    match = _peaks(left, right, x, y, -1, maximum)
+    if match is not None:
+        reverse = _peaks(right, left, round(match), y, 1, maximum)
+        if reverse is not None and abs(reverse-x) <= 1.25:
+            return match
+    return None
+
+
 def measure_surface(pair, x, y, radius_px=14):
     """Fit a local surface near a normalized left-eye image point."""
+    return measure_surface_in_context(stereo_context(pair), x, y, radius_px)
+
+
+def measure_surface_in_context(context, x, y, radius_px=14):
+    """Fit a point using an already validated, decoded stereo pair."""
     if not (0 <= x < 1 and 0 <= y < 1 and 6 <= radius_px <= 32):
         raise ValueError("Use normalized left-eye coordinates and a radius between 6 and 32 pixels")
-    images, hud, pose, baseline = stereo_context(pair)
+    images, hud, pose, baseline = context
     left, right = images
     height, width = left.shape
     cx, cy = round(x * (width - 1)), round(y * (height - 1))
@@ -82,11 +99,8 @@ def measure_surface(pair, x, y, radius_px=14):
             if any(y1-5 <= py <= y2+5 and x1-5 <= px <= x2+maximum+5
                    for x1, y1, x2, y2 in overlays):
                 continue
-            match = _peaks(left, right, px, py, -1, maximum)
+            match = match_stereo_pixel(left, right, px, py, maximum)
             if match is None:
-                continue
-            reverse = _peaks(right, left, round(match), py, 1, maximum)
-            if reverse is None or abs(reverse-px) > 1.25:
                 continue
             depth = K[0, 0] * baseline / (px - match)
             points.append([px, py, depth])
